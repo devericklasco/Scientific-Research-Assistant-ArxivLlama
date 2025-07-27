@@ -24,7 +24,7 @@
 - 📊 Retrieve responses with relevance-based citations  
 - 📖 Get contextual excerpts from the source documents  
 
-![Question Interface](images/image2.png)
+![Question Interface](images/Image2.png)
 
 ### 🛠️ Research Tools
 - 📑 APA-style citation generator  
@@ -33,26 +33,26 @@
 - 🗂️ Persistent vector storage via **ChromaDB**  
 
 ## Installation & Setup
-# Clone the repository
+### Clone the repository
 git clone https://github.com/devericklasco/Scientific-Research-Assistant-ArxivLlama.git
 cd Scientific-Research-Assistant-ArxivLlama
 
-# Create and activate a virtual environment
+### Create and activate a virtual environment
 python -m venv .venv
-source .venv/bin/activate       # Linux/MacOS
-.\.venv\Scripts\activate        # Windows
+source .venv/bin/activate 
+.\.venv\Scripts\activate 
 
-# Install dependencies
+### Install dependencies
 pip install -r requirements.txt
 
-# Set up environment variables
+###Set up environment variables
 cp .env.example .env
 
-# Run the Streamlit app
+### Run the Streamlit app
 streamlit run app.py
 
-### Usage Guide
-## Step 1: Download Papers
+## Usage Guide
+### Step 1: Download Papers
 Input your research topic (e.g., "reinforcement learning in robotics")
 
 Choose the number of papers to download (1–50)
@@ -62,13 +62,13 @@ Downloads saved to: data/papers/
 ![Download Interface](images/download2.png)  
 
 
-## Step 2: Process PDFs
+### Step 2: Process PDFs
 Automatically extract and chunk text semantically
 
 Outputs stored in: data/chunks/ as .json
 ![ProcessPDF Interface](images/processpdf.png) 
 
-## Step 3: Create Vector Index
+### Step 3: Create Vector Index
 Builds a semantic index from paper chunks
 
 Uses OpenAI embeddings with optional cost tracking
@@ -77,14 +77,14 @@ Output: searchable knowledge base
 ![Create Vector Interface](images/createvector2.png)
 ![Create Vector Interface](images/createvector.png)
 
-## Step 4: Query Research Papers
+### Step 4: Query Research Papers
 Ask questions like:
 Get responses with source citations and context
 ![Questions Interface](images/questions.png)
 APA citations are included
 ![Ask Interface](images/citations.png)
 
-## Step 5: Get Paper Recommendations
+### Step 5: Get Paper Recommendations
 Based on semantic similarity to your questions or uploaded content
 
 Helps discover relevant papers within your indexed library
@@ -92,7 +92,7 @@ Helps discover relevant papers within your indexed library
 ![Recommendations Interface](images/recommendation.png)
 
 
-## Contact  
+### Contact  
 Built with ❤️ by [Erick Busuulwa](https://github.com/devericklasco)  
 Follow me on [Twitter](https://x.com/ericklasco)  
 
