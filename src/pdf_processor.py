@@ -5,18 +5,30 @@ from dotenv import load_dotenv
 from tqdm import tqdm
 import re
 import json
-from uuid import uuid4
 
 load_dotenv()
 
 # Configuration
 DATA_PATH = Path(os.getenv("DATA_PATH", "./data/papers"))
-CHUNK_PATH = Path(os.getenv("CHUNK_PATH", "./data/chunks"))  # New directory for chunk files
+CHUNK_PATH = Path(os.getenv("CHUNK_PATH", "./data/chunks"))
 CHUNK_SIZE = 512  # Optimal for GPT models
 
 # Create directories if they don't exist
 DATA_PATH.mkdir(parents=True, exist_ok=True)
 CHUNK_PATH.mkdir(parents=True, exist_ok=True)
+
+def load_metadata(pdf_path: Path) -> dict:
+    """Load paper metadata from JSON file"""
+    metadata_path = pdf_path.with_suffix('.json')
+    if metadata_path.exists():
+        with open(metadata_path, 'r') as f:
+            return json.load(f)
+    return {
+        "title": pdf_path.stem,
+        "authors": [],
+        "published": "",
+        "arxiv_id": pdf_path.stem
+    }
 
 def clean_text(text: str) -> str:
     """Remove unwanted characters and formatting"""
@@ -64,28 +76,12 @@ def chunk_text(sections: list, chunk_size: int = CHUNK_SIZE) -> list:
         
     return chunks
 
-def extract_title(pdf_path: Path) -> str:
-    """Extract title from first page of PDF"""
-    try:
-        doc = fitz.open(pdf_path)
-        first_page = doc[0].get_text()
-        # Look for title-like text (uppercase, centered, etc.)
-        lines = first_page.split('\n')
-        if lines:
-            return lines[0].strip()
-    except:
-        pass
-    return pdf_path.stem  # Fallback to filename
-
 def process_papers():
     processed = {}
     for pdf_file in tqdm(list(DATA_PATH.glob("*.pdf")), desc="Processing PDFs"):
         try:
-            # Generate unique paper ID
-            paper_id = f"paper_{uuid4().hex[:8]}"
-            
-            # Extract actual title
-            title = extract_title(pdf_file)
+            # Load metadata
+            metadata = load_metadata(pdf_file)
             
             # Process content
             sections = extract_sections(pdf_file)
@@ -93,20 +89,24 @@ def process_papers():
             
             # Save chunks to JSON
             chunk_data = {
-                "paper_id": paper_id,
-                "title": title,
+                "paper_id": metadata["arxiv_id"],
+                "title": metadata["title"],
                 "file_path": str(pdf_file),
+                # "authors": metadata["authors"],
+                "authors": ", ".join(metadata["authors"]),  # Store as string early
+                "published": metadata["published"],
+                "arxiv_id": metadata["arxiv_id"],
                 "chunks": chunks
             }
             
-            output_file = CHUNK_PATH / f"{paper_id}.json"
+            output_file = CHUNK_PATH / f"{metadata['arxiv_id']}.json"
             with open(output_file, 'w') as f:
-                json.dump(chunk_data, f)
+                json.dump(chunk_data, f, indent=2)
             
-            processed[paper_id] = {
+            processed[metadata["arxiv_id"]] = {
                 "path": str(pdf_file),
                 "num_chunks": len(chunks),
-                "title": title
+                "title": metadata["title"]
             }
         except Exception as e:
             print(f"Failed to process {pdf_file.name}: {str(e)}")
@@ -114,7 +114,8 @@ def process_papers():
     return processed
 
 if __name__ == "__main__":
+    print("Starting PDF processing...")
     processed_papers = process_papers()
     total_chunks = sum(meta["num_chunks"] for meta in processed_papers.values())
-    print(f"Processed {len(processed_papers)} papers into {total_chunks} text chunks")
-    print(f"Chunk data saved to: {CHUNK_PATH}")
+    print(f"✅ Processed {len(processed_papers)} papers into {total_chunks} text chunks")
+    print(f"📁 Chunk data saved to: {CHUNK_PATH}")

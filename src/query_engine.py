@@ -1,3 +1,7 @@
+import sys
+from pathlib import Path
+project_root = Path(__file__).parent.parent
+sys.path.append(str(project_root))
 from llama_index.core import VectorStoreIndex, StorageContext
 from llama_index.vector_stores.chroma import ChromaVectorStore
 from llama_index.llms.openai import OpenAI
@@ -5,23 +9,25 @@ from llama_index.embeddings.openai import OpenAIEmbedding
 from llama_index.core import Settings
 import chromadb
 from dotenv import load_dotenv
-from pathlib import Path
 import os
 import tiktoken
-import time  # Added missing import
+import time
+import json
+from src.citation_generator import generate_apa_citation
 
 # Load environment variables
 load_dotenv()
 
+# Configuration
+EMBED_MODEL = "text-embedding-3-small"  # Defined here
+
 def count_tokens(text: str) -> int:
-    """Count tokens using OpenAI's tokenizer"""
     encoder = tiktoken.get_encoding("cl100k_base")
     return len(encoder.encode(text))
 
 def initialize_engine():
     # Configuration
     INDEX_PATH = Path(os.getenv("INDEX_PATH", "./data/indices"))
-    EMBED_MODEL = "text-embedding-3-small"
     
     # Initialize ChromaDB
     chroma_client = chromadb.PersistentClient(path=str(INDEX_PATH / "chroma_db"))
@@ -45,13 +51,32 @@ def initialize_engine():
         similarity_top_k=3,
         response_mode="compact"
     )
-    return query_engine, llm
+    return query_engine, llm, chroma_collection
+
+def get_paper_recommendations(query_engine, topic: str, num_papers: int = 3) -> str:
+    prompt = (
+        f"Based on the research topic: '{topic}', recommend {num_papers} papers from the collection. "
+        "For each recommendation, include:\n"
+        "1. Paper title\n"
+        "2. Brief justification (1 sentence)\n"
+        "3. Key contribution\n"
+        "Format as markdown bullet points."
+    )
+    response = query_engine.query(prompt)
+    return response.response
+
+def get_paper_metadata(chroma_collection, paper_id: str) -> dict:
+    result = chroma_collection.get(ids=[paper_id], include=["metadatas"])
+    if result and result["metadatas"]:
+        return result["metadatas"][0]
+    return {}
 
 if __name__ == "__main__":
     print("Initializing research assistant...")
-    engine, llm = initialize_engine()
+    engine, llm, chroma_collection = initialize_engine()
     print("✅ System ready. Type your questions about the research papers.")
-    print("   Type 'exit' to quit.\n")
+    print("   Type 'exit' to quit, '!recommend' for paper recommendations,")
+    print("   or '!cite <paper_id>' to generate a citation.\n")
     
     total_cost = 0.0
     
@@ -60,30 +85,54 @@ if __name__ == "__main__":
         if query.lower() in ['exit', 'quit']:
             break
             
+        if query.startswith("!recommend"):
+            topic = query.replace("!recommend", "").strip() or "machine learning"
+            print(f"\n🔍 Getting recommendations for: {topic}")
+            recommendations = get_paper_recommendations(engine, topic)
+            print(f"\n📚 Recommended Papers:\n{recommendations}")
+            continue
+            
+        if query.startswith("!cite"):
+            try:
+                paper_id = query.split()[1]
+                metadata = get_paper_metadata(chroma_collection, paper_id)
+                if metadata:
+                    citation = generate_apa_citation(metadata)
+                    print(f"\n📝 APA Citation for {metadata.get('title', 'paper')}:")
+                    print(citation)
+                else:
+                    print(f"❌ Paper ID {paper_id} not found")
+            except IndexError:
+                print("❌ Please specify a paper ID: !cite <paper_id>")
+            continue
+            
         # Track query cost
         start_time = time.time()
         response = engine.query(query)
         elapsed = time.time() - start_time
         
-        # Calculate token usage and cost
-        input_tokens = count_tokens(query + " ".join([n.text for n in response.source_nodes]))
+        context_text = " ".join([n.text for n in response.source_nodes]) if response.source_nodes else ""
+        input_tokens = count_tokens(query + context_text)
         output_tokens = count_tokens(response.response)
         
-        # GPT-4o pricing: $5/1M input tokens, $15/1M output tokens
         cost = (input_tokens/1000000*5) + (output_tokens/1000000*15)
         total_cost += cost
         
-        # Show response
         print(f"\n💡 Answer ({elapsed:.1f}s, ${cost:.6f}):")
         print(response.response)
         
-        # Show sources
-        print("\n🔍 Sources:")
-        for i, source in enumerate(response.source_nodes, 1):
-            source_id = source.metadata.get("paper_id", "unknown")
-            title = source.metadata.get("title", "Untitled Paper")
-            print(f"{i}. [{source_id}] {title}")
-            print(f"   Relevance: {source.score:.3f}")
-            print(f"   Excerpt: {source.text[:150]}...")
+        if response.source_nodes:
+            print("\n🔍 Sources:")
+            for i, source in enumerate(response.source_nodes, 1):
+                metadata = source.metadata or {}
+                source_id = metadata.get("paper_id", "unknown")
+                title = metadata.get("title", "Untitled Paper")
+                score = source.score or 0.0
+                
+                print(f"{i}. [{source_id}] {title}")
+                print(f"   Relevance: {score:.3f}")
+                print(f"   Excerpt: {source.text[:150]}...")
+        else:
+            print("\n🔍 No sources found for this response")
     
     print(f"\nℹ️ Total session cost: ${total_cost:.6f}")

@@ -1,0 +1,222 @@
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning)
+import streamlit as st
+from src.query_engine import initialize_engine, get_paper_recommendations
+from src.create_index import create_vector_index
+from src.pdf_processor import process_papers
+from src.arxiv_downloader import search_and_download_papers
+from src.citation_generator import generate_apa_citation
+from pathlib import Path
+import os
+import time
+import json
+import shutil
+
+# Configure Streamlit
+st.set_page_config(page_title="ArxivLlama", page_icon="🦙", layout="wide")
+st.title("🦙 ArxivLlama - RAG Powered Scientific Research Assistant")
+
+# Initialize session state
+if "engine" not in st.session_state:
+    st.session_state.engine = None
+    st.session_state.chroma_collection = None
+    st.session_state.index_ready = False
+    st.session_state.paper_metadata = {}
+
+# Sidebar for setup
+with st.sidebar:
+    st.header("⚙️ Configuration")
+    api_key = st.text_input("OpenAI API Key", type="password", value=os.getenv("OPENAI_API_KEY", ""))
+    os.environ["OPENAI_API_KEY"] = api_key
+    
+    st.divider()
+    st.header("📥 Paper Management")
+    
+    # Paper download section
+    with st.expander("Download Papers from ArXiv"):
+        topic = st.text_input("Research Topic", placeholder="e.g., large language models")
+        max_results = st.slider("Max Papers", 1, 50, 10)
+        
+        if st.button("Download Papers", key="download_btn"):
+            if not topic:
+                st.warning("Please enter a research topic")
+            else:
+                with st.spinner(f"Downloading {max_results} papers..."):
+                    papers = search_and_download_papers(topic, max_results)
+                    st.success(f"Downloaded {len(papers)} papers!")
+                    st.session_state.paper_metadata.update(
+                        {meta['arxiv_id']: meta for _, meta in papers.items()}
+                    )
+    
+    # Processing section
+    if st.button("Process PDFs", key="process_btn"):
+        with st.spinner("Extracting text and creating chunks..."):
+            result = process_papers()
+            st.success(f"Processed {len(result)} papers into chunks!")
+            
+            # Load metadata into session state
+            papers_path = Path(os.getenv("DATA_PATH", "./data/papers"))
+            for json_file in papers_path.glob("*.json"):
+                with open(json_file, 'r') as f:
+                    meta = json.load(f)
+                    st.session_state.paper_metadata[meta["arxiv_id"]] = meta
+
+    if st.button("Create Vector Index", key="index_btn"):
+        with st.spinner("Creating semantic index (this may take a few minutes)..."):
+            # Clear previous index
+            index_path = Path("./data/indices/chroma_db")
+            if index_path.exists():
+                shutil.rmtree(index_path)
+            
+            index, vector_count = create_vector_index()  # Only unpack two values
+            st.session_state.engine, _, st.session_state.chroma_collection = initialize_engine()
+            st.session_state.index_ready = True
+            st.success(f"Index created with {vector_count} vectors!")
+            
+            # Load chunk metadata
+            chunk_path = Path(os.getenv("CHUNK_PATH", "./data/chunks"))
+            for json_file in chunk_path.glob("*.json"):
+                with open(json_file, 'r') as f:
+                    meta = json.load(f)
+                    st.session_state.paper_metadata[meta["arxiv_id"]] = meta  
+
+    # # Indexing section
+    # if st.button("Create Vector Index", key="index_btn"):
+    #     with st.spinner("Creating semantic index (this may take a few minutes)..."):
+    #         # Clear previous index
+    #         index_path = Path("./data/indices/chroma_db")
+    #         if index_path.exists():
+    #             shutil.rmtree(index_path)
+            
+    #         index, vector_count, chroma_collection = create_vector_index()
+    #         st.session_state.engine, _, st.session_state.chroma_collection = initialize_engine()
+    #         st.session_state.index_ready = True
+    #         st.success(f"Index created with {vector_count} vectors!")
+            
+    #         # Load chunk metadata
+    #         chunk_path = Path(os.getenv("CHUNK_PATH", "./data/chunks"))
+    #         for json_file in chunk_path.glob("*.json"):
+    #             with open(json_file, 'r') as f:
+    #                 meta = json.load(f)
+    #                 st.session_state.paper_metadata[meta["arxiv_id"]] = meta
+
+# Main chat interface
+if st.session_state.index_ready:
+    st.subheader("💬 Research Assistant")
+    st.caption("Ask questions about your research papers")
+    
+    # Initialize chat history
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
+    
+    # Display chat messages
+    for message in st.session_state.messages:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+            
+            # Show sources if available
+            if message["role"] == "assistant" and "sources" in message:
+                with st.expander("View Sources & Citations"):
+                    for i, source in enumerate(message["sources"], 1):
+                        metadata = source["metadata"]
+                        st.markdown(f"**Source {i}:**")
+                        st.caption(f"**Title:** {metadata.get('title', 'Untitled')}")
+                        st.caption(f"**Authors:** {', '.join(metadata.get('authors', []))}")
+                        st.caption(f"**Published:** {metadata.get('published', 'Unknown')}")
+                        
+                        # Generate and display citation
+                        citation = generate_apa_citation(metadata)
+                        st.code(citation, language="text")
+                        
+                        st.caption(f"**Excerpt:** {source['text'][:200]}...")
+                        st.divider()
+    
+    # Accept user input
+    if prompt := st.chat_input("Your research question"):
+        # Add user message to chat history
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        
+        # Display user message
+        with st.chat_message("user"):
+            st.markdown(prompt)
+        
+        # Get assistant response
+        with st.chat_message("assistant"):
+            message_placeholder = st.empty()
+            full_response = ""
+            
+            start_time = time.time()
+            response = st.session_state.engine.query(prompt)
+            elapsed = time.time() - start_time
+            
+            # Display response
+            full_response += f"{response.response}\n\n"
+            message_placeholder.markdown(full_response)
+            
+            # Prepare sources for display
+            sources = []
+            if response.source_nodes:
+                for source in response.source_nodes:
+                    paper_id = source.metadata.get("arxiv_id", "")
+                    metadata = st.session_state.paper_metadata.get(
+                        paper_id, 
+                        source.metadata
+                    )
+                    sources.append({
+                        "text": source.text,
+                        "metadata": metadata,
+                        "score": source.score or 0.0
+                    })
+            
+            # Add assistant response to chat history
+            st.session_state.messages.append({
+                "role": "assistant", 
+                "content": full_response,
+                "sources": sources
+            })
+else:
+    st.info("Please configure and create an index using the sidebar controls")
+
+# Paper recommendation section
+st.divider()
+st.subheader("📚 Paper Recommendations")
+
+if st.session_state.index_ready:
+    rec_topic = st.text_input("Enter research topic for recommendations", 
+                             placeholder="e.g., transformer architectures")
+    num_papers = st.slider("Number of recommendations", 1, 10, 3)
+    
+    if st.button("Get Recommendations"):
+        if not rec_topic:
+            st.warning("Please enter a research topic")
+        else:
+            with st.spinner("Finding relevant papers..."):
+                recommendations = get_paper_recommendations(
+                    st.session_state.engine, 
+                    rec_topic,
+                    num_papers
+                )
+                st.markdown(recommendations)
+
+# Citation generator section
+st.divider()
+st.subheader("📝 Citation Generator")
+
+if st.session_state.paper_metadata:
+    paper_options = {meta['arxiv_id']: meta['title'] 
+                    for meta in st.session_state.paper_metadata.values()}
+    selected_id = st.selectbox("Select paper to cite", options=list(paper_options.keys()),
+                              format_func=lambda id: f"{paper_options[id]} ({id})")
+    
+    if selected_id:
+        metadata = st.session_state.paper_metadata.get(selected_id, {})
+        citation = generate_apa_citation(metadata)
+        
+        st.code(citation, language="text")
+        
+        if st.button("Copy to Clipboard"):
+            st.session_state.copied = True
+            st.code(citation, language="text")
+            st.success("Citation copied to clipboard!")
+else:
+    st.info("Download and process papers to generate citations")
