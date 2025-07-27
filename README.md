@@ -32,15 +32,18 @@
 - 💰 Cost tracking for OpenAI API calls  
 - 🗂️ Persistent vector storage via **ChromaDB**  
 
+---
+
 ## 🧱 Tech Stack
+
 ```mermaid
 graph LR
 A[ArXiv API] --> B[PDF Processing]
 B --> C[Text Chunking]
 C --> D[Embedding Generation]
-D --> E[Vector Database (ChromaDB)]
-E --> F[Query Engine (LlamaIndex)]
-F --> G[LLM Interface (OpenAI)]
+D --> E[Vector DB: ChromaDB]
+E --> F[Query Engine: LlamaIndex]
+F --> G[LLM Interface: OpenAI]
 G --> H[Streamlit UI]
 
 ## ⚙️ Installation & Setup
