@@ -7,7 +7,7 @@
 
 **ArxivLlama** transforms the way you explore and understand scientific literature by integrating Retrieval-Augmented Generation (RAG), natural language interfaces, and semantic search. This tool enables researchers to **search, analyze, summarize, and cite ArXiv papers with ease**.
 
-![ArxivLlama Interface](images/image1.png)
+![UI ArxivLlama Interface](images/image1.png)
 
 ---
 
@@ -24,27 +24,13 @@
 - 📊 Retrieve responses with relevance-based citations  
 - 📖 Get contextual excerpts from the source documents  
 
-![ArxivLlama Interface](images/image3.png)
+![Question Interface](images/image2.png)
 
 ### 🛠️ Research Tools
 - 📑 APA-style citation generator  
 - 📚 AI-driven paper recommendations  
 - 💰 Cost tracking for OpenAI API calls  
 - 🗂️ Persistent vector storage via **ChromaDB**  
-
----
-
-## 🧱 Tech Stack
-
-```mermaid
-graph LR
-A[ArXiv API] --> B[PDF Processing]
-B --> C[Text Chunking]
-C --> D[Embedding Generation]
-D --> E[Vector DB: ChromaDB]
-E --> F[Query Engine: LlamaIndex]
-F --> G[LLM Interface: OpenAI]
-G --> H[Streamlit UI]
 
 ## Installation & Setup
 # Clone the repository
@@ -72,15 +58,15 @@ Input your research topic (e.g., "reinforcement learning in robotics")
 Choose the number of papers to download (1–50)
 
 Downloads saved to: data/papers/
-![ArxivLlama Interface](images/download.png)
-![ArxivLlama Interface](images/download2.png)  
+![Download Interface](images/download.png)
+![Download Interface](images/download2.png)  
 
 
 ## Step 2: Process PDFs
 Automatically extract and chunk text semantically
 
 Outputs stored in: data/chunks/ as .json
-![ArxivLlama Interface](images/processpdf.png) 
+![ProcessPDF Interface](images/processpdf.png) 
 
 ## Step 3: Create Vector Index
 Builds a semantic index from paper chunks
@@ -88,22 +74,22 @@ Builds a semantic index from paper chunks
 Uses OpenAI embeddings with optional cost tracking
 
 Output: searchable knowledge base
-![ArxivLlama Interface](images/createvector2.png)
-![ArxivLlama Interface](images/createvector.png)
+![Create Vector Interface](images/createvector2.png)
+![Create Vector Interface](images/createvector.png)
 
 ## Step 4: Query Research Papers
 Ask questions like:
 Get responses with source citations and context
-![ArxivLlama Interface](images/questions.png)
+![Questions Interface](images/questions.png)
 APA citations are included
-![ArxivLlama Interface](images/citations.png)
+![Ask Interface](images/citations.png)
 
 ## Step 5: Get Paper Recommendations
 Based on semantic similarity to your questions or uploaded content
 
 Helps discover relevant papers within your indexed library
 
-![ArxivLlama Interface](images/recommendation.png)
+![Recommendations Interface](images/recommendation.png)
 
 
 ## Contact  
@@ -111,4 +97,17 @@ Built with ❤️ by [Erick Busuulwa](https://github.com/devericklasco)
 Follow me on [Twitter](https://x.com/ericklasco)  
 
 
+---
+
+## 🧱 Tech Stack
+
+```mermaid
+graph LR
+A[ArXiv API] --> B[PDF Processing]
+B --> C[Text Chunking]
+C --> D[Embedding Generation]
+D --> E[Vector DB: ChromaDB]
+E --> F[Query Engine: LlamaIndex]
+F --> G[LLM Interface: OpenAI]
+G --> H[Streamlit UI]
 
