@@ -3,7 +3,8 @@ from pathlib import Path
 project_root = Path(__file__).parent.parent
 sys.path.append(str(project_root))
 from llama_index.core import VectorStoreIndex, StorageContext
-from llama_index.vector_stores.faiss import FaissVectorStore
+# from llama_index.vector_stores.faiss import FaissVectorStore
+from llama_index.vector_stores import FaissVectorStore
 from llama_index.llms.openai import OpenAI
 from llama_index.embeddings.openai import OpenAIEmbedding
 from llama_index.core import Settings

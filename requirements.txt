@@ -2,11 +2,11 @@ llama-index-core>=0.10.0
 llama-index-readers-file
 llama-index-llms-openai
 llama-index-embeddings-openai
-llama-index-vector-stores-faiss
+llama-index-vector-stores-faiss>=0.1.0
 arxiv
 PyMuPDF
 python-dotenv
 tqdm
 tiktoken
 streamlit
-faiss
+faiss-cpu==1.7.4
