@@ -11,12 +11,13 @@ import json
 import hashlib
 import time
 import shutil
-import stat
 
 # Load environment variables
 load_dotenv()
 
 # Configuration
+CHUNK_PATH = Path(os.getenv("CHUNK_PATH", "./data/chunks"))
+INDEX_PATH = Path(os.getenv("INDEX_PATH", "./data/indices"))
 EMBED_MODEL = "text-embedding-3-small"
 
 def create_vector_index():
@@ -27,20 +28,11 @@ def create_vector_index():
     print("🚀 Starting index creation...")
     start_time = time.time()
     
-    # Determine storage location based on environment
-    if "STREAMLIT_SERVER" in os.environ:
-        persist_dir = "/tmp/chroma_db"
-    else:
-        persist_dir = os.getenv("INDEX_PATH", "./data/indices/chroma_db")
-    
-    # Ensure directory exists and has write permissions
-    os.makedirs(persist_dir, exist_ok=True)
-    
-    # Set full write permissions (important for ChromaDB)
-    os.chmod(persist_dir, stat.S_IRWXU | stat.S_IRWXG | stat.S_IRWXO)
+    # Create storage directory
+    INDEX_PATH.mkdir(parents=True, exist_ok=True)
     
     # Initialize ChromaDB with direct embedding function
-    chroma_client = chromadb.PersistentClient(path=persist_dir)
+    chroma_client = chromadb.PersistentClient(path=str(INDEX_PATH / "chroma_db"))
     
     # Create or get collection with embedding function
     embed_func = embedding_functions.OpenAIEmbeddingFunction(
@@ -54,14 +46,11 @@ def create_vector_index():
         metadata={"hnsw:space": "cosine"}
     )
     
-    # Get chunk path from environment
-    chunk_path = Path(os.getenv("CHUNK_PATH", "./data/chunks"))
-    
     # Load and process chunk files
-    chunk_files = list(chunk_path.glob("*.json"))
+    chunk_files = list(CHUNK_PATH.glob("*.json"))
     
     if not chunk_files:
-        print(f"❌ No JSON files found in {chunk_path}. Run PDF processor first.")
+        print(f"❌ No JSON files found in {CHUNK_PATH}. Run PDF processor first.")
         return None, 0
     
     # Prepare data for insertion
@@ -149,7 +138,7 @@ def create_vector_index():
 
 if __name__ == "__main__":
     # Clear previous index data
-    chroma_db_path = Path("./data/indices/chroma_db")
+    chroma_db_path = INDEX_PATH / "chroma_db"
     if chroma_db_path.exists():
         print("🧹 Cleaning up previous index data...")
         shutil.rmtree(chroma_db_path)
@@ -164,5 +153,5 @@ if __name__ == "__main__":
         print("\n🎉 Index is ready for querying!")
         
         print(f"\n✅ Successfully created index with {vector_count} vectors")
-        print(f"🔑 Vector store persisted at: ./data/indices/chroma_db")
+        print(f"🔑 Vector store persisted at: {INDEX_PATH / 'chroma_db'}")
         print(f"💡 Estimated embedding cost: ${vector_count * 0.0000001:.6f}")

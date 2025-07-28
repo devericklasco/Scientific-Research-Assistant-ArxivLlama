@@ -11,6 +11,7 @@ tqdm
 tiktoken
 streamlit
 pysqlite3-binary>=0.4.7
+pyyaml>=6.0
 
 # sqlite3
 # pysqlite3-binary

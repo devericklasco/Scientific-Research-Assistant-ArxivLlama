@@ -14,46 +14,71 @@ import tiktoken
 import time
 import json
 from src.citation_generator import generate_apa_citation
+from typing import Tuple, Optional, Union
+from llama_index.core.query_engine import BaseQueryEngine
 
 # Load environment variables
 load_dotenv()
 
 # Configuration
-EMBED_MODEL = "text-embedding-3-small"  # Defined here
+EMBED_MODEL = "text-embedding-3-small"
 
 def count_tokens(text: str) -> int:
+    """Count tokens using tiktoken"""
     encoder = tiktoken.get_encoding("cl100k_base")
     return len(encoder.encode(text))
 
-def initialize_engine():
-    # Configuration
-    INDEX_PATH = Path(os.getenv("INDEX_PATH", "./data/indices"))
-    
-    # Initialize ChromaDB
-    chroma_client = chromadb.PersistentClient(path=str(INDEX_PATH / "chroma_db"))
-    chroma_collection = chroma_client.get_collection("arxiv_papers")
-    vector_store = ChromaVectorStore(chroma_collection=chroma_collection)
-    storage_context = StorageContext.from_defaults(vector_store=vector_store)
-    
-    # Configure embedding model
-    Settings.embed_model = OpenAIEmbedding(model=EMBED_MODEL)
-    
-    # Load index
-    index = VectorStoreIndex.from_vector_store(
-        vector_store, 
-        storage_context=storage_context
-    )
-    
+def create_query_engine_from_index(index: VectorStoreIndex) -> BaseQueryEngine:
+    """Create query engine directly from a VectorStoreIndex"""
     # Create query engine with GPT-4o
     llm = OpenAI(model="gpt-4o", temperature=0.1)
-    query_engine = index.as_query_engine(
+    return index.as_query_engine(
         llm=llm,
         similarity_top_k=3,
         response_mode="compact"
     )
-    return query_engine, llm, chroma_collection
 
-def get_paper_recommendations(query_engine, topic: str, num_papers: int = 3) -> str:
+def initialize_engine() -> Tuple[Optional[BaseQueryEngine], Optional[VectorStoreIndex], Optional[chromadb.Collection]]:
+    """Initialize query engine from persisted ChromaDB collection"""
+    if not os.getenv("OPENAI_API_KEY"):
+        print("❌ OPENAI_API_KEY not set in environment")
+        return None, None, None
+
+    # Determine storage location based on environment
+    if "STREAMLIT_SERVER" in os.environ:
+        persist_dir = "/tmp/chroma_db"
+    else:
+        persist_dir = os.getenv("INDEX_PATH", "./data/indices/chroma_db")
+    
+    # Initialize ChromaDB
+    chroma_client = chromadb.PersistentClient(path=persist_dir)
+    
+    try:
+        # Try to get existing collection
+        chroma_collection = chroma_client.get_collection("arxiv_papers")
+    except chromadb.errors.NotFoundError:
+        print(f"❌ Collection 'arxiv_papers' not found at {persist_dir}")
+        return None, None, None
+    
+    # Create LlamaIndex components
+    vector_store = ChromaVectorStore(chroma_collection=chroma_collection)
+    storage_context = StorageContext.from_defaults(vector_store=vector_store)
+    embed_model = OpenAIEmbedding(model=EMBED_MODEL)
+    
+    # Create index
+    index = VectorStoreIndex.from_vector_store(
+        vector_store, 
+        storage_context=storage_context,
+        embed_model=embed_model
+    )
+    
+    # Create query engine
+    query_engine = create_query_engine_from_index(index)
+    
+    return query_engine, index, chroma_collection
+
+def get_paper_recommendations(query_engine: BaseQueryEngine, topic: str, num_papers: int = 3) -> str:
+    """Get paper recommendations based on a topic"""
     prompt = (
         f"Based on the research topic: '{topic}', recommend {num_papers} papers from the collection. "
         "For each recommendation, include:\n"
@@ -65,7 +90,8 @@ def get_paper_recommendations(query_engine, topic: str, num_papers: int = 3) -> 
     response = query_engine.query(prompt)
     return response.response
 
-def get_paper_metadata(chroma_collection, paper_id: str) -> dict:
+def get_paper_metadata(chroma_collection: chromadb.Collection, paper_id: str) -> dict:
+    """Get metadata for a specific paper"""
     result = chroma_collection.get(ids=[paper_id], include=["metadatas"])
     if result and result["metadatas"]:
         return result["metadatas"][0]
@@ -73,7 +99,12 @@ def get_paper_metadata(chroma_collection, paper_id: str) -> dict:
 
 if __name__ == "__main__":
     print("Initializing research assistant...")
-    engine, llm, chroma_collection = initialize_engine()
+    engine, index, chroma_collection = initialize_engine()
+    
+    if not engine:
+        print("❌ Failed to initialize query engine. Please create an index first.")
+        exit(1)
+    
     print("✅ System ready. Type your questions about the research papers.")
     print("   Type 'exit' to quit, '!recommend' for paper recommendations,")
     print("   or '!cite <paper_id>' to generate a citation.\n")

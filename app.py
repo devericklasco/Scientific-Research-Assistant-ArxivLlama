@@ -1,6 +1,3 @@
-__import__('pysqlite3')
-import sys
-sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
 import sqlite3
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -15,6 +12,8 @@ import os
 import time
 import json
 import shutil
+import atexit
+import stat
 
 # Configure Streamlit
 st.set_page_config(page_title="ArxivLlama", page_icon="🦙", layout="wide")
@@ -26,6 +25,67 @@ if "engine" not in st.session_state:
     st.session_state.chroma_collection = None
     st.session_state.index_ready = False
     st.session_state.paper_metadata = {}
+    st.session_state.chroma_path = ""
+
+# Cleanup function for Streamlit Cloud
+@atexit.register
+def cleanup():
+    if "STREAMLIT_SERVER" in os.environ:
+        # Clean temporary ChromaDB directory
+        chroma_path = Path("/tmp/chroma_db")
+        if chroma_path.exists():
+            shutil.rmtree(chroma_path, ignore_errors=True)
+        # Clean temporary papers
+        papers_path = Path("/tmp/papers")
+        if papers_path.exists():
+            shutil.rmtree(papers_path, ignore_errors=True)
+        # Clean temporary chunks
+        chunks_path = Path("/tmp/chunks")
+        if chunks_path.exists():
+            shutil.rmtree(chunks_path, ignore_errors=True)
+
+# Helper function to clear previous downloads
+def clear_previous_downloads():
+    # Determine storage location based on environment
+    if "STREAMLIT_SERVER" in os.environ:
+        papers_path = Path("/tmp/papers")
+        chunks_path = Path("/tmp/chunks")
+        chroma_path = Path("/tmp/chroma_db")
+    else:
+        papers_path = Path(os.getenv("DATA_PATH", "./data/papers"))
+        chunks_path = Path(os.getenv("CHUNK_PATH", "./data/chunks"))
+        chroma_path = Path(os.getenv("INDEX_PATH", "./data/indices/chroma_db"))
+    
+    # Clear papers directory
+    if papers_path.exists():
+        shutil.rmtree(papers_path)
+    papers_path.mkdir(parents=True, exist_ok=True)
+    
+    # Clear chunks directory
+    if chunks_path.exists():
+        shutil.rmtree(chunks_path)
+    chunks_path.mkdir(parents=True, exist_ok=True)
+    
+    # Clear chroma directory
+    if chroma_path.exists():
+        shutil.rmtree(chroma_path)
+    chroma_path.mkdir(parents=True, exist_ok=True)
+    
+    # Set full permissions
+    for path in [papers_path, chunks_path, chroma_path]:
+        os.chmod(path, stat.S_IRWXU | stat.S_IRWXG | stat.S_IRWXO)
+    
+    # Clear session metadata
+    st.session_state.paper_metadata = {}
+    st.session_state.index_ready = False
+    st.session_state.engine = None
+    
+    # Set environment variables for other modules
+    os.environ["DATA_PATH"] = str(papers_path)
+    os.environ["CHUNK_PATH"] = str(chunks_path)
+    os.environ["INDEX_PATH"] = str(chroma_path)
+    
+    return papers_path, chunks_path, chroma_path
 
 # Sidebar for setup
 with st.sidebar:
@@ -45,6 +105,10 @@ with st.sidebar:
             if not topic:
                 st.warning("Please enter a research topic")
             else:
+                with st.spinner("Preparing directories..."):
+                    # Clear previous downloads
+                    papers_path, chunks_path, chroma_path = clear_previous_downloads()
+                    
                 with st.spinner(f"Downloading {max_results} papers..."):
                     papers = search_and_download_papers(topic, max_results)
                     st.success(f"Downloaded {len(papers)} papers!")
@@ -65,36 +129,24 @@ with st.sidebar:
                     meta = json.load(f)
                     st.session_state.paper_metadata[meta["arxiv_id"]] = meta
 
-    if st.button("Create Vector Index", key="index_btn"):
-        with st.spinner("Creating semantic index (this may take a few minutes)..."):
-            # Clear previous index
-            index_path = Path("./data/indices/chroma_db")
-            if index_path.exists():
-                shutil.rmtree(index_path)
-            
-            index, vector_count = create_vector_index()  # Only unpack two values
-            st.session_state.engine, _, st.session_state.chroma_collection = initialize_engine()
-            st.session_state.index_ready = True
-            st.success(f"Index created with {vector_count} vectors!")
-            
-            # Load chunk metadata
-            chunk_path = Path(os.getenv("CHUNK_PATH", "./data/chunks"))
-            for json_file in chunk_path.glob("*.json"):
-                with open(json_file, 'r') as f:
-                    meta = json.load(f)
-                    st.session_state.paper_metadata[meta["arxiv_id"]] = meta  
-
-    # # Indexing section
     # if st.button("Create Vector Index", key="index_btn"):
     #     with st.spinner("Creating semantic index (this may take a few minutes)..."):
-    #         # Clear previous index
-    #         index_path = Path("./data/indices/chroma_db")
-    #         if index_path.exists():
-    #             shutil.rmtree(index_path)
+    #         # Get the chroma path from environment
+    #         chroma_path = Path(os.getenv("INDEX_PATH", "./data/indices/chroma_db"))
             
-    #         index, vector_count, chroma_collection = create_vector_index()
+    #         # Clear any existing index
+    #         if chroma_path.exists():
+    #             shutil.rmtree(chroma_path)
+            
+    #         # Create directory with full permissions
+    #         chroma_path.mkdir(parents=True, exist_ok=True)
+    #         os.chmod(chroma_path, stat.S_IRWXU | stat.S_IRWXG | stat.S_IRWXO)
+            
+    #         # Create index
+    #         index, vector_count = create_vector_index()
     #         st.session_state.engine, _, st.session_state.chroma_collection = initialize_engine()
     #         st.session_state.index_ready = True
+    #         st.session_state.chroma_path = str(chroma_path)
     #         st.success(f"Index created with {vector_count} vectors!")
             
     #         # Load chunk metadata
@@ -103,6 +155,41 @@ with st.sidebar:
     #             with open(json_file, 'r') as f:
     #                 meta = json.load(f)
     #                 st.session_state.paper_metadata[meta["arxiv_id"]] = meta
+    if st.button("Create Vector Index", key="index_btn"):
+        with st.spinner("Creating semantic index (this may take a few minutes)..."):
+            # Get the chroma path from environment
+            chroma_path = Path(os.getenv("INDEX_PATH", "./data/indices/chroma_db"))
+            
+            # Clear any existing index
+            if chroma_path.exists():
+                shutil.rmtree(chroma_path)
+            
+            # Create directory with full permissions
+            chroma_path.mkdir(parents=True, exist_ok=True)
+            os.chmod(chroma_path, stat.S_IRWXU | stat.S_IRWXG | stat.S_IRWXO)
+            
+            # Create index
+            index, vector_count = create_vector_index()
+            
+            # Create query engine directly from the new index
+            if index:
+                from src.query_engine import create_query_engine_from_index
+                query_engine = create_query_engine_from_index(index)
+                
+                # Store in session state
+                st.session_state.engine = query_engine
+                st.session_state.index_ready = True
+                st.session_state.chroma_path = str(chroma_path)
+                st.success(f"Index created with {vector_count} vectors!")
+                
+                # Load chunk metadata
+                chunk_path = Path(os.getenv("CHUNK_PATH", "./data/chunks"))
+                for json_file in chunk_path.glob("*.json"):
+                    with open(json_file, 'r') as f:
+                        meta = json.load(f)
+                        st.session_state.paper_metadata[meta["arxiv_id"]] = meta
+            else:
+                st.error("Failed to create index!")
 
 # Main chat interface
 if st.session_state.index_ready:
