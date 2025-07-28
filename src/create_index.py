@@ -110,7 +110,8 @@ def create_vector_index():
         )
     
     # Create LlamaIndex wrapper
-    vector_store = ChromaVectorStore(chroma_collection=chroma_collection)
+    # vector_store = ChromaVectorStore(chroma_collection=chroma_collection)
+    vector_store = ChromaVectorStore(collection=chroma_collection)
     storage_context = StorageContext.from_defaults(vector_store=vector_store)
     
     # Explicitly create embedding model
