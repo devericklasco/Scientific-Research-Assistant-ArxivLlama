@@ -2,11 +2,11 @@ llama-index-core>=0.10.0
 llama-index-readers-file
 llama-index-llms-openai
 llama-index-embeddings-openai
-llama-index-vector-stores-chroma
+llama-index-vector-stores-faiss
 arxiv
 PyMuPDF
 python-dotenv
-chromadb>=1.0.0
 tqdm
 tiktoken
 streamlit
+faiss
