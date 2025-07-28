@@ -2,63 +2,66 @@ import sys
 from pathlib import Path
 project_root = Path(__file__).parent.parent
 sys.path.append(str(project_root))
-from llama_index.core import VectorStoreIndex, StorageContext
-from llama_index.vector_stores.faiss import FaissVectorStore
-from llama_index.llms.openai import OpenAI
-from llama_index.embeddings.openai import OpenAIEmbedding
-from llama_index.core import Settings
-import tiktoken
-import time
-# import faiss
-import json
-from src.citation_generator import generate_apa_citation
+
 import os
+import json
+import time
 from dotenv import load_dotenv
 
-# Load environment variables
-load_dotenv()
+import tiktoken
+import faiss
 
-# Configuration
+from llama_index.core import VectorStoreIndex, StorageContext, Settings
+from llama_index.llms.openai import OpenAI
+from llama_index.embeddings.openai import OpenAIEmbedding
+
+from src.citation_generator import generate_apa_citation
+
+# ─── Load env & config ─────────────────────────────────────────────────────────
+
+load_dotenv()
 EMBED_MODEL = "text-embedding-3-small"
-INDEX_PATH = Path(os.getenv("INDEX_PATH", "./data/indices"))
+STORE_DIR   = Path(os.getenv("INDEX_PATH", "./data/indices")) / "faiss_store"
+
+# ─── Utils ───────────────────────────────────────────────────────────────────────
 
 def count_tokens(text: str) -> int:
     encoder = tiktoken.get_encoding("cl100k_base")
     return len(encoder.encode(text))
 
+# ─── Core initialization ────────────────────────────────────────────────────────
+
 def initialize_engine():
     """Initialize the FAISS-based query engine"""
-    # Load FAISS index from disk
-    # Load FAISS index directly
-    faiss_index = faiss.read_index(str(INDEX_PATH / "faiss_index.bin"))
-    # vector_store = FaissVectorStore.from_persist_dir(str(INDEX_PATH / "faiss_index"))
-    # Create vector store
-    vector_store = FaissVectorStore.from_persist_dir(
-        persist_dir=str(INDEX_PATH / "faiss_vector_store"))
-    vector_store.faiss_index = faiss_index
-    storage_context = StorageContext.from_defaults(vector_store=vector_store)
-    
-    
-    # Configure embedding model
+    if not STORE_DIR.exists():
+        raise RuntimeError(f"No persisted index found at {STORE_DIR}")
+
+    # ⚙️ Clean up any corrupted JSON that isn’t valid UTF‑8
+    bad = STORE_DIR / "image__vector_store.json"
+    if bad.exists():
+        bad.unlink()  # remove the file so LlamaIndex won’t try to JSON‑decode it
+
+    # 1) Load **all** storage: FAISS index, vector‑store metadata, docstore, index store, etc.
+    storage_context = StorageContext.from_defaults(persist_dir=str(STORE_DIR))
+
+    # 2) Wire up your embedding model for any downstream uses
     Settings.embed_model = OpenAIEmbedding(model=EMBED_MODEL)
-    
-    # Create index
-    index = VectorStoreIndex.from_vector_store(
-        vector_store, 
-        storage_context=storage_context
-    )
-    
-    # Create query engine with GPT-4o
+
+    # 3) Reconstruct the **full** VectorStoreIndex (embeddings + text) from that context
+    index = VectorStoreIndex.from_storage_context(storage_context)
+
+    # 4) Spin up the query engine
     llm = OpenAI(model="gpt-4o", temperature=0.1)
     query_engine = index.as_query_engine(
         llm=llm,
         similarity_top_k=3,
-        response_mode="compact"
+        response_mode="compact",
     )
     return query_engine
 
+# ─── Helpers ─────────────────────────────────────────────────────────────────────
+
 def get_paper_recommendations(query_engine, topic: str, num_papers: int = 3) -> str:
-    """Get paper recommendations based on research topic"""
     prompt = (
         f"Based on the research topic: '{topic}', recommend {num_papers} papers from the collection. "
         "For each recommendation, include:\n"
@@ -71,82 +74,67 @@ def get_paper_recommendations(query_engine, topic: str, num_papers: int = 3) -> 
     return response.response
 
 def load_paper_metadata():
-    """Load paper metadata from chunk files"""
     metadata = {}
     chunk_path = Path(os.getenv("CHUNK_PATH", "./data/chunks"))
-    
     for json_file in chunk_path.glob("*.json"):
-        with open(json_file, 'r') as f:
-            try:
-                paper_data = json.load(f)
-                metadata[paper_data["arxiv_id"]] = paper_data
-            except (json.JSONDecodeError, KeyError):
-                continue
+        try:
+            data = json.loads(json_file.read_text())
+            metadata[data["arxiv_id"]] = data
+        except (json.JSONDecodeError, KeyError):
+            continue
     return metadata
 
-# CLI functionality removed since app.py is the main interface
-# FAISS doesn't support direct metadata retrieval by ID like Chroma did
-# Metadata is now managed through load_paper_metadata() and session state in app.py
+# ─── CLI Entrypoint ─────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    print("Initializing research assistant...")
+    print("Initializing research assistant…")
     engine = initialize_engine()
     paper_metadata = load_paper_metadata()
-    print("✅ System ready. Type your questions about the research papers.")
+    print("✅ System ready. Type your questions below.")
     print("   Type 'exit' to quit or '!recommend' for paper recommendations\n")
-    
+
     total_cost = 0.0
-    
     while True:
-        query = input("\n📝 Your research question: ")
-        if query.lower() in ['exit', 'quit']:
+        query = input("📝 Your research question: ")
+        if query.lower() in ["exit", "quit"]:
             break
-            
+
         if query.startswith("!recommend"):
             topic = query.replace("!recommend", "").strip() or "machine learning"
-            print(f"\n🔍 Getting recommendations for: {topic}")
-            recommendations = get_paper_recommendations(engine, topic)
-            print(f"\n📚 Recommended Papers:\n{recommendations}")
+            print(f"\n🔍 Recommendations for '{topic}':")
+            print(get_paper_recommendations(engine, topic))
             continue
-     
-        # Track query cost
-        start_time = time.time()
+
+        # Run the query and track cost/time
+        start = time.time()
         response = engine.query(query)
-        elapsed = time.time() - start_time
-        
-        context_text = " ".join([n.text for n in response.source_nodes]) if response.source_nodes else ""
-        input_tokens = count_tokens(query + context_text)
-        output_tokens = count_tokens(response.response)
-        
-        # Updated pricing for GPT-4o (May 2024 pricing)
-        input_cost_per_token = 5 / 1_000_000  # $5 per 1M tokens
-        output_cost_per_token = 15 / 1_000_000  # $15 per 1M tokens
-        cost = (input_tokens * input_cost_per_token) + (output_tokens * output_cost_per_token)
+        elapsed = time.time() - start
+
+        ctx_text = " ".join(n.text for n in response.source_nodes) if response.source_nodes else ""
+        in_toks = count_tokens(query + ctx_text)
+        out_toks = count_tokens(response.response)
+        # GPT-4o pricing: $5/1M in, $15/1M out
+        cost = (in_toks * 5 + out_toks * 15) / 1_000_000
         total_cost += cost
-        
-        print(f"\n💡 Answer ({elapsed:.1f}s, ${cost:.6f}):")
-        print(response.response)
-        
+
+        # Print answer
+        print(f"\n💡 Answer ({elapsed:.2f}s, ${cost:.6f}):\n{response.response}\n")
+
+        # Print sources if available
         if response.source_nodes:
-            print("\n🔍 Sources:")
-            for i, source in enumerate(response.source_nodes, 1):
-                metadata = source.metadata or {}
-                source_id = metadata.get("arxiv_id", "unknown")
-                
-                # Get full metadata from loaded paper data
-                paper_meta = paper_metadata.get(source_id, {})
-                title = paper_meta.get("title", metadata.get("title", "Untitled Paper"))
-                authors = paper_meta.get("authors", metadata.get("authors", "Unknown authors"))
-                
-                print(f"{i}. [{source_id}] {title}")
+            print("🔍 Sources:")
+            for i, node in enumerate(response.source_nodes, 1):
+                md = node.metadata or {}
+                pid = md.get("arxiv_id", "unknown")
+                pm = paper_metadata.get(pid, {})
+                title   = pm.get("title", md.get("title", "Untitled"))
+                authors = pm.get("authors", md.get("authors", "Unknown"))
+                print(f"{i}. {title} [{pid}]")
                 print(f"   Authors: {authors}")
-                print(f"   Relevance: {source.score or 0.0:.3f}")
-                print(f"   Excerpt: {source.text[:150]}...")
-                
-                # Generate citation
-                citation = generate_apa_citation(paper_meta or metadata)
-                print(f"   Citation: {citation[:60]}...")
+                print(f"   Score: {node.score:.3f}")
+                print(f"   Excerpt: {node.text[:120]}…")
+                print(f"   Citation: {generate_apa_citation(pm or md)}\n")
         else:
-            print("\n🔍 No sources found for this response")
-    
-    print(f"\nℹ️ Total session cost: ${total_cost:.6f}")
+            print("🔍 No sources found.\n")
+
+    print(f"Session ended. Total cost: ${total_cost:.6f}")

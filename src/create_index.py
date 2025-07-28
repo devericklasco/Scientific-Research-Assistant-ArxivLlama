@@ -1,143 +1,111 @@
 import os
-from pathlib import Path
-from dotenv import load_dotenv
-from llama_index.core import VectorStoreIndex, StorageContext
-from llama_index.vector_stores.faiss import FaissVectorStore
-from llama_index.embeddings.openai import OpenAIEmbedding
-from llama_index.core.schema import TextNode  # Add this import
-import faiss
-from tqdm import tqdm
 import json
 import hashlib
 import time
 import shutil
+from pathlib import Path
+from dotenv import load_dotenv
+from tqdm import tqdm
 
-# Load environment variables
+import faiss
+from llama_index.core import VectorStoreIndex, StorageContext
+from llama_index.vector_stores.faiss import FaissVectorStore
+from llama_index.embeddings.openai import OpenAIEmbedding
+from llama_index.core.schema import TextNode
+
+# ─── Configuration ─────────────────────────────────────────────────────────────
+
 load_dotenv()
-
-# Configuration
-CHUNK_PATH = Path(os.getenv("CHUNK_PATH", "./data/chunks"))
-INDEX_PATH = Path(os.getenv("INDEX_PATH", "./data/indices"))
+CHUNK_PATH  = Path(os.getenv("CHUNK_PATH",  "./data/chunks"))
+INDEX_ROOT  = Path(os.getenv("INDEX_PATH", "./data/indices"))
+STORE_DIR   = INDEX_ROOT / "faiss_store"
 EMBED_MODEL = "text-embedding-3-small"
-EMBED_DIM = 1536  # Dimension for text-embedding-3-small
+EMBED_DIM   = 1536
+
+# ─── Index builder ─────────────────────────────────────────────────────────────
 
 def create_vector_index():
     if not os.getenv("OPENAI_API_KEY"):
-        print("❌ OPENAI_API_KEY not set in environment")
-        return None, 0
+        raise RuntimeError("❌ OPENAI_API_KEY not set in environment")
 
-    print("🚀 Starting index creation...")
-    start_time = time.time()
-    
-    # Create storage directory
-    INDEX_PATH.mkdir(parents=True, exist_ok=True)
-    
-    # Initialize FAISS index
-    faiss_index = faiss.IndexFlatIP(EMBED_DIM)  # Inner product for cosine similarity
-    # Save FAISS index to disk - UPDATED PERSISTENCE
-    faiss.write_index(faiss_index, str(INDEX_PATH / "faiss_index.bin"))
-    vector_store = FaissVectorStore(faiss_index=faiss_index)
-    # Also save the vector store configuration
-    vector_store.persist(persist_path=str(INDEX_PATH / "faiss_vector_store"))
-    
-    # Load and process chunk files
+    print("🚀 Starting index creation…")
+    t0 = time.time()
+
+    # 1) Clear any old store
+    if STORE_DIR.exists():
+        shutil.rmtree(STORE_DIR)
+    STORE_DIR.mkdir(parents=True, exist_ok=True)
+
+    # 2) Create an empty FAISS index and wrap in LlamaIndex
+    faiss_idx    = faiss.IndexFlatIP(EMBED_DIM)
+    vector_store = FaissVectorStore(faiss_index=faiss_idx)
+
+    # 3) Build a StorageContext _in memory_ using that vector_store
+    storage_ctx  = StorageContext.from_defaults(vector_store=vector_store)
+    embed_model  = OpenAIEmbedding(model=EMBED_MODEL)
+
+    # 4) Load your chunk files
     chunk_files = list(CHUNK_PATH.glob("*.json"))
-    
     if not chunk_files:
-        print(f"❌ No JSON files found in {CHUNK_PATH}. Run PDF processor first.")
-        return None, 0
-    
-    # Prepare nodes for insertion
-    print(f"📚 Processing {len(chunk_files)} papers...")
-    nodes = []
-    
-    for chunk_file in tqdm(chunk_files, desc="Processing papers"):
-        with open(chunk_file, 'r') as f:
-            try:
-                paper_data = json.load(f)
-            except json.JSONDecodeError:
-                print(f"⚠️ Skipping invalid JSON file: {chunk_file}")
-                continue
-                
-        # Safely get arxiv_id with fallback
-        arxiv_id = paper_data.get("arxiv_id", chunk_file.stem)
-        
-        # Create nodes for each chunk
-        for i, chunk_text in enumerate(paper_data["chunks"]):
-            # Create unique ID for each chunk
-            chunk_id = f"{arxiv_id}_{i}"
-            doc_id = hashlib.md5(chunk_id.encode()).hexdigest()
+        raise RuntimeError(f"❌ No JSON chunks found in {CHUNK_PATH}")
 
-            authors_list = paper_data.get("authors", [])
-            authors_str = ", ".join(authors_list)
-            
-            # Create TextNode with metadata
-            node = TextNode(
-                id_=doc_id,
-                text=chunk_text,
+    print(f"📚 Processing {len(chunk_files)} files…")
+    nodes = []
+    for cf in tqdm(chunk_files, desc="Reading chunks"):
+        data = json.loads(cf.read_text())
+        arxiv_id = data.get("arxiv_id", cf.stem)
+        authors  = ", ".join(data.get("authors", []))
+
+        for i, txt in enumerate(data.get("chunks", [])):
+            uid = hashlib.md5(f"{arxiv_id}_{i}".encode()).hexdigest()
+            nodes.append(TextNode(
+                id_=uid,
+                text=txt,
                 metadata={
                     "paper_id": arxiv_id,
-                    "title": paper_data.get("title", "Untitled Paper"),
-                    "chunk_id": i,
-                    "file_path": paper_data.get("file_path", ""),
-                    "arxiv_id": arxiv_id,
-                    "authors": authors_str,
-                    "published": paper_data.get("published", "")
+                    "title":     data.get("title", "Untitled"),
+                    "chunk_id":  i,
+                    "file_path": data.get("file_path", ""),
+                    "arxiv_id":  arxiv_id,
+                    "authors":   authors,
+                    "published": data.get("published", ""),
                 }
-            )
-            nodes.append(node)
-    
-    print(f"🧩 Total chunks to index: {len(nodes)}")
-    
-    # Create storage context and embedding model
-    storage_context = StorageContext.from_defaults(vector_store=vector_store)
-    embed_model = OpenAIEmbedding(model=EMBED_MODEL)
-    
-    # Create index - use nodes directly
+            ))
+
+    # 5) Build the VectorStoreIndex _in memory_
+    print(f"🧩 Indexing {len(nodes)} chunks…")
     index = VectorStoreIndex(
         nodes=nodes,
-        storage_context=storage_context,
+        storage_context=storage_ctx,
         embed_model=embed_model,
-        show_progress=True  # Show progress bar during indexing
+        show_progress=True
     )
-    
-    # Save FAISS index to disk
-    vector_store.persist(persist_path=str(INDEX_PATH / "faiss_index"))
-    
-    # Calculate cost metrics
-    vector_count = len(nodes)
-    approx_tokens_per_chunk = 300
-    total_tokens = vector_count * approx_tokens_per_chunk
-    
-    # Updated pricing for text-embedding-3-small ($0.02 per 1M tokens)
-    embedding_cost = (total_tokens / 1_000_000) * 0.02
-    
-    elapsed = time.time() - start_time
-    
-    print(f"\n✅ Index creation complete!")
-    print(f"   Total vectors: {vector_count}")
-    print(f"   Time taken: {elapsed:.1f} seconds")
-    print(f"   Estimated tokens processed: {total_tokens}")
-    print(f"   Estimated embedding cost: ${embedding_cost:.6f}")
-    
-    return index, vector_count
+
+    # 6) Persist _all_ storage artifacts to disk:
+    #    - faiss_index.bin
+    #    - default__vector_store.json
+    #    - docstore.json
+    index.storage_context.persist(persist_dir=str(STORE_DIR))
+
+    # 7) Report metrics
+    n = len(nodes)
+    tokens = n * 300
+    cost   = tokens / 1e6 * 0.02
+    elapsed = time.time() - t0
+
+    print(f"\n✅ Done: {n} vectors in {elapsed:.1f}s")
+    print(f"   Estimated tokens: {tokens}")
+    print(f"   Embedding cost: ${cost:.6f}")
+    print(f"   Store directory: {STORE_DIR}")
+
+    return index, n
+
+# ─── Entrypoint ────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    # Clear previous index data
-    faiss_index_path = INDEX_PATH / "faiss_index"
-    if faiss_index_path.exists():
-        print("🧹 Cleaning up previous index data...")
-        shutil.rmtree(faiss_index_path)
-    
-    index, vector_count = create_vector_index()
-    
-    if index and vector_count > 0:
-        print("\n🔍 Testing query functionality...")
-        query_engine = index.as_query_engine(similarity_top_k=1)
-        test_response = query_engine.query("What is the main topic?")
-        print(f"   Test response: {test_response.response[:150]}...")
-        print("\n🎉 Index is ready for querying!")
-        
-        print(f"\n✅ Successfully created index with {vector_count} vectors")
-        print(f"🔑 Vector store persisted at: {INDEX_PATH / 'faiss_index'}")
-        print(f"💡 Estimated embedding cost: ${(vector_count * 300 / 1_000_000) * 0.02:.6f}")
+    idx, count = create_vector_index()
+    if count > 0:
+        print("\n🔍 Quick test query…")
+        qe   = idx.as_query_engine(similarity_top_k=1)
+        resp = qe.query("What is the main topic?")
+        print("→", resp.response[:150], "…")
