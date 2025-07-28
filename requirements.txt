@@ -10,5 +10,3 @@ chromadb
 tqdm
 tiktoken
 streamlit
-sqlite3
-pysqlite3-binary
