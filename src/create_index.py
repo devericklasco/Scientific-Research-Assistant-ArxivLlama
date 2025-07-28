@@ -5,6 +5,8 @@ from llama_index.core import VectorStoreIndex, StorageContext
 from llama_index.vector_stores.chroma import ChromaVectorStore
 from llama_index.embeddings.openai import OpenAIEmbedding
 import chromadb
+# from chromadb.config import Settings
+# from chromadb.api import PersistentClient
 from chromadb.utils import embedding_functions
 from tqdm import tqdm
 import json
@@ -31,7 +33,8 @@ def create_vector_index():
     # Create storage directory
     INDEX_PATH.mkdir(parents=True, exist_ok=True)
     
-    # Initialize ChromaDB with direct embedding function
+    # # Initialize ChromaDB with direct embedding function
+    # chroma_client = chromadb.PersistentClient(path=str(INDEX_PATH / "chroma_db"))
     chroma_client = chromadb.PersistentClient(path=str(INDEX_PATH / "chroma_db"))
     
     # Create or get collection with embedding function

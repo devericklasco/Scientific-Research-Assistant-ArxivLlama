@@ -1,7 +1,4 @@
-# __import__('pysqlite3')
-# import sys
-# sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
-import sqlite3
+# import sqlite3
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
 import streamlit as st
