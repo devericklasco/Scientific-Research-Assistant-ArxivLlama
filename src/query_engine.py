@@ -9,7 +9,7 @@ from llama_index.embeddings.openai import OpenAIEmbedding
 from llama_index.core import Settings
 import tiktoken
 import time
-import faiss
+# import faiss
 import json
 from src.citation_generator import generate_apa_citation
 import os
