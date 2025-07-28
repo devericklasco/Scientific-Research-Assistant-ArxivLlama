@@ -22,116 +22,112 @@ st.set_page_config(page_title="ArxivLlama", page_icon="🦙", layout="wide")
 st.title("🦙 ArxivLlama - RAG Powered Scientific Research Assistant")
 
 def cleanup_faiss_index():
-    """Clean up previous FAISS index files"""
-    index_files = [
-        INDEX_PATH / "faiss_index",
+    """Clean up previous index files"""
+    files_to_remove = [
         INDEX_PATH / "faiss_index.bin",
-        INDEX_PATH / "faiss_vector_store",
-        INDEX_PATH / "default__vector_store.json"
+        INDEX_PATH / "docstore.json",
+        INDEX_PATH / "graph_store.json",
+        INDEX_PATH / "index_store.json",
+        INDEX_PATH / "vector_store.json"
     ]
-    
-    for file_path in index_files:
+    for file_path in files_to_remove:
         try:
             if file_path.exists():
-                if file_path.is_dir():
-                    shutil.rmtree(file_path)
-                else:
-                    file_path.unlink()
+                file_path.unlink()
         except Exception as e:
-            print(f"⚠️ Could not delete {file_path}: {str(e)}")
+            st.error(f"Couldn't remove {file_path}: {str(e)}")
             return False
     return True
 
 
+# Initialize session state
+if "engine" not in st.session_state:
+    st.session_state.engine = None
+    st.session_state.index_ready = False
+    st.session_state.paper_metadata = {}
 
-# # Initialize session state
-# if "engine" not in st.session_state:
-#     st.session_state.engine = None
-#     st.session_state.index_ready = False
-#     st.session_state.paper_metadata = {}
+def load_paper_metadata():
+    """Load paper metadata from chunk files"""
+    metadata = {}
+    for json_file in CHUNK_PATH.glob("*.json"):
+        with open(json_file, 'r') as f:
+            try:
+                meta = json.load(f)
+                metadata[meta["arxiv_id"]] = meta
+            except (json.JSONDecodeError, KeyError):
+                continue
+    return metadata
 
-# def load_paper_metadata():
-#     """Load paper metadata from chunk files"""
-#     metadata = {}
-#     for json_file in CHUNK_PATH.glob("*.json"):
-#         with open(json_file, 'r') as f:
-#             try:
-#                 meta = json.load(f)
-#                 metadata[meta["arxiv_id"]] = meta
-#             except (json.JSONDecodeError, KeyError):
-#                 continue
-#     return metadata
-
-# # Sidebar for setup
-# with st.sidebar:
-#     st.header("⚙️ Configuration")
-#     api_key = st.text_input("OpenAI API Key", type="password", value=os.getenv("OPENAI_API_KEY", ""))
-#     os.environ["OPENAI_API_KEY"] = api_key
+# Sidebar for setup
+with st.sidebar:
+    st.header("⚙️ Configuration")
+    api_key = st.text_input("OpenAI API Key", type="password", value=os.getenv("OPENAI_API_KEY", ""))
+    os.environ["OPENAI_API_KEY"] = api_key
     
-#     st.divider()
-#     st.header("📥 Paper Management")
+    st.divider()
+    st.header("📥 Paper Management")
     
-#     # Paper download section
-#     with st.expander("Download Papers from ArXiv"):
-#         topic = st.text_input("Research Topic", placeholder="e.g., large language models")
-#         max_results = st.slider("Max Papers", 1, 50, 10)
+    # Paper download section
+    with st.expander("Download Papers from ArXiv"):
+        topic = st.text_input("Research Topic", placeholder="e.g., large language models")
+        max_results = st.slider("Max Papers", 1, 50, 10)
         
-#         if st.button("Download Papers", key="download_btn"):
-#             if not topic:
-#                 st.warning("Please enter a research topic")
-#             elif not api_key:
-#                 st.warning("Please enter your OpenAI API key")
-#             else:
-#                 with st.spinner(f"Downloading {max_results} papers..."):
-#                     papers = search_and_download_papers(topic, max_results)
-#                     if papers:
-#                         st.success(f"Downloaded {len(papers)} papers!")
-#                         st.session_state.paper_metadata.update(
-#                             {meta['arxiv_id']: meta for _, meta in papers.items()}
-#                         )
-#                     else:
-#                         st.error("Failed to download papers")
+        if st.button("Download Papers", key="download_btn"):
+            if not topic:
+                st.warning("Please enter a research topic")
+            elif not api_key:
+                st.warning("Please enter your OpenAI API key")
+            else:
+                with st.spinner(f"Downloading {max_results} papers..."):
+                    papers = search_and_download_papers(topic, max_results)
+                    if papers:
+                        st.success(f"Downloaded {len(papers)} papers!")
+                        st.session_state.paper_metadata.update(
+                            {meta['arxiv_id']: meta for _, meta in papers.items()}
+                        )
+                    else:
+                        st.error("Failed to download papers")
     
-#     # Processing section
-#     if st.button("Process PDFs", key="process_btn"):
-#         if not api_key:
-#             st.warning("Please enter your OpenAI API key")
-#         else:
-#             with st.spinner("Extracting text and creating chunks..."):
-#                 result = process_papers()
-#                 if result:
-#                     st.success(f"Processed {len(result)} papers into chunks!")
-#                     st.session_state.paper_metadata = load_paper_metadata()
-#                 else:
-#                     st.error("No papers processed - check PDF directory")
+    # Processing section
+    if st.button("Process PDFs", key="process_btn"):
+        if not api_key:
+            st.warning("Please enter your OpenAI API key")
+        else:
+            with st.spinner("Extracting text and creating chunks..."):
+                result = process_papers()
+                if result:
+                    st.success(f"Processed {len(result)} papers into chunks!")
+                    st.session_state.paper_metadata = load_paper_metadata()
+                else:
+                    st.error("No papers processed - check PDF directory")
 
-#     # Index creation section
-#     if st.button("Create Vector Index", key="index_btn"):
-#         if not api_key:
-#             st.warning("Please enter your OpenAI API key")
-#         else:
-#             with st.spinner("Creating semantic index (this may take a few minutes)..."):
-#                 # Clear previous index
-#                 faiss_index_path = INDEX_PATH / "faiss_index"
-#                 try:
-#                     # Handle both directory and file cases
-#                     if faiss_index_path.exists():
-#                         if faiss_index_path.is_dir():
-#                             shutil.rmtree(faiss_index_path)
-#                         else:
-#                             faiss_index_path.unlink()
+    # Index creation section
+    if st.button("Create Vector Index", key="index_btn"):
+        if not api_key:
+            st.warning("Please enter your OpenAI API key")
+        else:
+            with st.spinner("Creating semantic index (this may take a few minutes)..."):
+                # Clear previous index
+                faiss_index_path = INDEX_PATH / "faiss_index"
+                try:
+                    # Handle both directory and file cases
+                    if faiss_index_path.exists():
+                        if faiss_index_path.is_dir():
+                            shutil.rmtree(faiss_index_path)
+                        else:
+                            faiss_index_path.unlink()
                     
-#                     # Create parent directory if it doesn't exist
-#                     INDEX_PATH.mkdir(parents=True, exist_ok=True)
+                    # Create parent directory if it doesn't exist
+                    INDEX_PATH.mkdir(parents=True, exist_ok=True)
                     
-#                     index, vector_count = create_vector_index()
-#                     st.session_state.engine = initialize_engine()
-#                     st.session_state.index_ready = True
-#                     st.session_state.paper_metadata = load_paper_metadata()
-#                     st.success(f"Index created with {vector_count} vectors!")
-#                 except Exception as e:
-#                     st.error(f"Index creation failed: {str(e)}")
-#                     st.error("Please check the index directory permissions")
+                    index, vector_count = create_vector_index()
+                    st.session_state.engine = initialize_engine()
+                    st.session_state.index_ready = True
+                    st.session_state.paper_metadata = load_paper_metadata()
+                    st.success(f"Index created with {vector_count} vectors!")
+                except Exception as e:
+                    st.error(f"Index creation failed: {str(e)}")
+                    st.error("Please check the index directory permissions")
 
 # Main chat interface
 if st.session_state.index_ready:
