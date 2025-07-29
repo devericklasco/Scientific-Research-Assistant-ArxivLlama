@@ -29,13 +29,15 @@ def create_vector_index():
     
     # Determine storage location
     persist_dir = "/tmp/chroma_db" if "STREAMLIT_SERVER" in os.environ else os.getenv("INDEX_PATH", "./data/indices/chroma_db")
-    persist_path = Path(persist_dir)
     
-    # Create directory with proper permissions
+    # Ensure clean directory with proper permissions
+    persist_path = Path(persist_dir)
     persist_path.mkdir(parents=True, exist_ok=True)
+    
+    # Set permissions (read/write/execute for all)
     os.chmod(persist_dir, stat.S_IRWXU | stat.S_IRWXG | stat.S_IRWXO)
     
-    # Initialize ChromaDB with reset capability
+    # Initialize ChromaDB
     chroma_client = chromadb.PersistentClient(
         path=persist_dir,
         settings=chromadb.Settings(
@@ -45,33 +47,18 @@ def create_vector_index():
         )
     )
     
-    # Completely reset the ChromaDB instance
+    # Clean up existing collection
     try:
-        chroma_client.reset()
-        print("♻️ Successfully reset ChromaDB instance")
+        chroma_client.delete_collection("arxiv_papers")
+        print("♻️ Deleted existing collection")
     except Exception as e:
-        print(f"⚠️ ChromaDB reset warning: {str(e)}")
-        # If reset fails, delete the entire directory
-        if persist_path.exists():
-            shutil.rmtree(persist_path, ignore_errors=True)
-            persist_path.mkdir(parents=True, exist_ok=True)
-            os.chmod(persist_dir, stat.S_IRWXU | stat.S_IRWXG | stat.S_IRWXO)
-            print("♻️ Deleted and recreated ChromaDB directory")
+        print(f"ℹ️ No existing collection to delete: {str(e)}")
     
     # Create new collection
-    try:
-        chroma_collection = chroma_client.create_collection(
-            name="arxiv_papers",
-            metadata={"hnsw:space": "cosine"}
-        )
-        print("🆕 Created new collection")
-    except Exception as e:
-        print(f"⚠️ Collection creation failed: {str(e)}")
-        print("🔄 Attempting to get existing collection")
-        chroma_collection = chroma_client.get_collection(
-            name="arxiv_papers"
-        )
-        print("🔁 Using existing collection")
+    chroma_collection = chroma_client.create_collection(
+        name="arxiv_papers",
+        metadata={"hnsw:space": "cosine"}
+    )
     
     # Get chunk path
     chunk_path = Path(os.getenv("CHUNK_PATH", "./data/chunks"))
@@ -125,7 +112,7 @@ def create_vector_index():
     # Batch embedding generation
     print("🧬 Generating embeddings in batches...")
     all_embeddings = []
-    embed_batch_size = 100
+    embed_batch_size = 100  # Optimal for OpenAI API
     
     for i in tqdm(range(0, len(all_documents), embed_batch_size), desc="Embedding"):
         batch_docs = all_documents[i:i+embed_batch_size]
@@ -134,7 +121,7 @@ def create_vector_index():
     
     # Batch insertion to ChromaDB
     print("📥 Inserting vectors into database...")
-    insert_batch_size = 100
+    insert_batch_size = 200
     
     for i in tqdm(range(0, len(all_ids), insert_batch_size), desc="Indexing"):
         batch_ids = all_ids[i:i+insert_batch_size]
@@ -178,3 +165,4 @@ if __name__ == "__main__":
         test_response = query_engine.query("What is the main topic?")
         print(f"   Test response: {test_response.response[:150]}...")
         print("\n🎉 Index ready for use!")
+        print(f"💡 Estimated embedding cost: ${(vector_count * 300 / 1_000_000) * 0.02:.6f}")
