@@ -6,9 +6,9 @@ import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
 # Disable ChromaDB telemetry
 import chromadb
-chromadb.utils.embedding_functions.DEFAULT_EMBEDDING_FUNC = None
-chromadb.utils.embedding_functions.DefaultEmbeddingFunction = None
-chromadb.Client = None
+# chromadb.utils.embedding_functions.DEFAULT_EMBEDDING_FUNC = None
+# chromadb.utils.embedding_functions.DefaultEmbeddingFunction = None
+# chromadb.Client = None
 import streamlit as st
 from src.query_engine import initialize_engine, get_paper_recommendations
 from src.create_index import create_vector_index
