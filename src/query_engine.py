@@ -6,7 +6,6 @@ from llama_index.core import VectorStoreIndex, StorageContext
 from llama_index.vector_stores.chroma import ChromaVectorStore
 from llama_index.llms.openai import OpenAI
 from llama_index.embeddings.openai import OpenAIEmbedding
-from llama_index.core import Settings
 import chromadb
 from dotenv import load_dotenv
 import os
@@ -14,7 +13,7 @@ import tiktoken
 import time
 import json
 from src.citation_generator import generate_apa_citation
-from typing import Tuple, Optional, Union
+from typing import Tuple, Optional
 from llama_index.core.query_engine import BaseQueryEngine
 
 # Load environment variables
@@ -51,7 +50,13 @@ def initialize_engine() -> Tuple[Optional[BaseQueryEngine], Optional[VectorStore
         persist_dir = os.getenv("INDEX_PATH", "./data/indices/chroma_db")
     
     # Initialize ChromaDB
-    chroma_client = chromadb.PersistentClient(path=persist_dir)
+    chroma_client = chromadb.PersistentClient(
+        path=persist_dir,
+        settings=chromadb.Settings(
+            is_persistent=True,
+            anonymized_telemetry=False
+        )
+    )
     
     try:
         # Try to get existing collection

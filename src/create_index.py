@@ -1,7 +1,7 @@
 import os
 from pathlib import Path
 from dotenv import load_dotenv
-from llama_index.core import VectorStoreIndex, StorageContext
+from llama_index.core import VectorStoreIndex, StorageContext, Document
 from llama_index.vector_stores.chroma import ChromaVectorStore
 from llama_index.embeddings.openai import OpenAIEmbedding
 import chromadb
@@ -33,24 +33,26 @@ def create_vector_index():
     else:
         persist_dir = os.getenv("INDEX_PATH", "./data/indices/chroma_db")
     
-    # Ensure directory exists and has write permissions
-    os.makedirs(persist_dir, exist_ok=True)
-    
-    # Set full write permissions (important for ChromaDB)
+    # Ensure clean directory
+    persist_path = Path(persist_dir)
+    if persist_path.exists():
+        shutil.rmtree(persist_path, ignore_errors=True)
+    persist_path.mkdir(parents=True, exist_ok=True)
     os.chmod(persist_dir, stat.S_IRWXU | stat.S_IRWXG | stat.S_IRWXO)
     
-    # Initialize ChromaDB with direct embedding function
-    chroma_client = chromadb.PersistentClient(path=persist_dir)
-    
-    # Create or get collection with embedding function
-    embed_func = embedding_functions.OpenAIEmbeddingFunction(
-        api_key=os.getenv("OPENAI_API_KEY"),
-        model_name=EMBED_MODEL
+    # Initialize ChromaDB
+    chroma_client = chromadb.PersistentClient(
+        path=persist_dir,
+        settings=chromadb.Settings(
+            is_persistent=True,
+            anonymized_telemetry=False,
+            allow_reset=True
+        )
     )
     
+    # Create or get collection WITHOUT embedding function
     chroma_collection = chroma_client.get_or_create_collection(
         name="arxiv_papers",
-        embedding_function=embed_func,
         metadata={"hnsw:space": "cosine"}
     )
     
@@ -69,6 +71,13 @@ def create_vector_index():
     ids = []
     documents = []
     metadatas = []
+    embeddings = []
+    
+    # Create embedding function
+    embed_func = embedding_functions.OpenAIEmbeddingFunction(
+        api_key=os.getenv("OPENAI_API_KEY"),
+        model_name=EMBED_MODEL
+    )
     
     for chunk_file in tqdm(chunk_files, desc="Processing papers"):
         with open(chunk_file, 'r') as f:
@@ -90,8 +99,12 @@ def create_vector_index():
             authors_list = paper_data.get("authors", [])
             authors_str = ", ".join(authors_list)
             
+            # Generate embedding
+            embedding = embed_func([chunk_text])[0]
+            
             ids.append(doc_id)
             documents.append(chunk_text)
+            embeddings.append(embedding)
             metadatas.append({
                 "paper_id": arxiv_id,
                 "title": paper_data.get("title", "Untitled Paper"),
@@ -109,11 +122,13 @@ def create_vector_index():
     for i in tqdm(range(0, len(ids), batch_size), desc="Indexing chunks"):
         batch_ids = ids[i:i+batch_size]
         batch_docs = documents[i:i+batch_size]
+        batch_embeddings = embeddings[i:i+batch_size]
         batch_metas = metadatas[i:i+batch_size]
         
         chroma_collection.add(
             ids=batch_ids,
             documents=batch_docs,
+            embeddings=batch_embeddings,
             metadatas=batch_metas
         )
     

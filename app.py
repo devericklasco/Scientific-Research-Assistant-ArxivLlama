@@ -4,6 +4,11 @@ sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
 import sqlite3
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
+# Disable ChromaDB telemetry
+import chromadb
+chromadb.utils.embedding_functions.DEFAULT_EMBEDDING_FUNC = None
+chromadb.utils.embedding_functions.DefaultEmbeddingFunction = None
+chromadb.Client = None
 import streamlit as st
 from src.query_engine import initialize_engine, get_paper_recommendations
 from src.create_index import create_vector_index
@@ -59,24 +64,15 @@ def clear_previous_downloads():
         chunks_path = Path(os.getenv("CHUNK_PATH", "./data/chunks"))
         chroma_path = Path(os.getenv("INDEX_PATH", "./data/indices/chroma_db"))
     
-    # Clear papers directory
-    if papers_path.exists():
-        shutil.rmtree(papers_path)
-    papers_path.mkdir(parents=True, exist_ok=True)
-    
-    # Clear chunks directory
-    if chunks_path.exists():
-        shutil.rmtree(chunks_path)
-    chunks_path.mkdir(parents=True, exist_ok=True)
-    
-    # Clear chroma directory
-    if chroma_path.exists():
-        shutil.rmtree(chroma_path)
-    chroma_path.mkdir(parents=True, exist_ok=True)
-    
-    # Set full permissions
+    # Clear directories with error handling
     for path in [papers_path, chunks_path, chroma_path]:
-        os.chmod(path, stat.S_IRWXU | stat.S_IRWXG | stat.S_IRWXO)
+        try:
+            if path.exists():
+                shutil.rmtree(path, ignore_errors=True)
+            path.mkdir(parents=True, exist_ok=True)
+            os.chmod(path, stat.S_IRWXU | stat.S_IRWXG | stat.S_IRWXO)
+        except Exception as e:
+            st.error(f"Error clearing {path}: {str(e)}")
     
     # Clear session metadata
     st.session_state.paper_metadata = {}
@@ -93,8 +89,14 @@ def clear_previous_downloads():
 # Sidebar for setup
 with st.sidebar:
     st.header("⚙️ Configuration")
-    api_key = st.text_input("OpenAI API Key", type="password", value=os.getenv("OPENAI_API_KEY", ""))
-    os.environ["OPENAI_API_KEY"] = api_key
+    api_key = st.text_input("OpenAI API Key", type="password", value="", help="Enter your OpenAI API key")
+    
+    # Only set environment variable when needed
+    if api_key:
+        os.environ["OPENAI_API_KEY"] = api_key
+    else:
+        if "OPENAI_API_KEY" in os.environ:
+            del os.environ["OPENAI_API_KEY"]
     
     st.divider()
     st.header("📥 Paper Management")
@@ -107,6 +109,8 @@ with st.sidebar:
         if st.button("Download Papers", key="download_btn"):
             if not topic:
                 st.warning("Please enter a research topic")
+            elif not api_key:
+                st.warning("Please enter your OpenAI API key")
             else:
                 with st.spinner("Preparing directories..."):
                     # Clear previous downloads
@@ -121,78 +125,59 @@ with st.sidebar:
     
     # Processing section
     if st.button("Process PDFs", key="process_btn"):
-        with st.spinner("Extracting text and creating chunks..."):
-            result = process_papers()
-            st.success(f"Processed {len(result)} papers into chunks!")
-            
-            # Load metadata into session state
-            papers_path = Path(os.getenv("DATA_PATH", "./data/papers"))
-            for json_file in papers_path.glob("*.json"):
-                with open(json_file, 'r') as f:
-                    meta = json.load(f)
-                    st.session_state.paper_metadata[meta["arxiv_id"]] = meta
-
-    # if st.button("Create Vector Index", key="index_btn"):
-    #     with st.spinner("Creating semantic index (this may take a few minutes)..."):
-    #         # Get the chroma path from environment
-    #         chroma_path = Path(os.getenv("INDEX_PATH", "./data/indices/chroma_db"))
-            
-    #         # Clear any existing index
-    #         if chroma_path.exists():
-    #             shutil.rmtree(chroma_path)
-            
-    #         # Create directory with full permissions
-    #         chroma_path.mkdir(parents=True, exist_ok=True)
-    #         os.chmod(chroma_path, stat.S_IRWXU | stat.S_IRWXG | stat.S_IRWXO)
-            
-    #         # Create index
-    #         index, vector_count = create_vector_index()
-    #         st.session_state.engine, _, st.session_state.chroma_collection = initialize_engine()
-    #         st.session_state.index_ready = True
-    #         st.session_state.chroma_path = str(chroma_path)
-    #         st.success(f"Index created with {vector_count} vectors!")
-            
-    #         # Load chunk metadata
-    #         chunk_path = Path(os.getenv("CHUNK_PATH", "./data/chunks"))
-    #         for json_file in chunk_path.glob("*.json"):
-    #             with open(json_file, 'r') as f:
-    #                 meta = json.load(f)
-    #                 st.session_state.paper_metadata[meta["arxiv_id"]] = meta
-    if st.button("Create Vector Index", key="index_btn"):
-        with st.spinner("Creating semantic index (this may take a few minutes)..."):
-            # Get the chroma path from environment
-            chroma_path = Path(os.getenv("INDEX_PATH", "./data/indices/chroma_db"))
-            
-            # Clear any existing index
-            if chroma_path.exists():
-                shutil.rmtree(chroma_path)
-            
-            # Create directory with full permissions
-            chroma_path.mkdir(parents=True, exist_ok=True)
-            os.chmod(chroma_path, stat.S_IRWXU | stat.S_IRWXG | stat.S_IRWXO)
-            
-            # Create index
-            index, vector_count = create_vector_index()
-            
-            # Create query engine directly from the new index
-            if index:
-                from src.query_engine import create_query_engine_from_index
-                query_engine = create_query_engine_from_index(index)
+        if not api_key:
+            st.warning("Please enter your OpenAI API key")
+        else:
+            with st.spinner("Extracting text and creating chunks..."):
+                result = process_papers()
+                st.success(f"Processed {len(result)} papers into chunks!")
                 
-                # Store in session state
-                st.session_state.engine = query_engine
-                st.session_state.index_ready = True
-                st.session_state.chroma_path = str(chroma_path)
-                st.success(f"Index created with {vector_count} vectors!")
-                
-                # Load chunk metadata
-                chunk_path = Path(os.getenv("CHUNK_PATH", "./data/chunks"))
-                for json_file in chunk_path.glob("*.json"):
+                # Load metadata into session state
+                papers_path = Path(os.getenv("DATA_PATH", "./data/papers"))
+                for json_file in papers_path.glob("*.json"):
                     with open(json_file, 'r') as f:
                         meta = json.load(f)
                         st.session_state.paper_metadata[meta["arxiv_id"]] = meta
-            else:
-                st.error("Failed to create index!")
+
+    # Index creation section
+    if st.button("Create Vector Index", key="index_btn"):
+        if not api_key:
+            st.warning("Please enter your OpenAI API key")
+        else:
+            with st.spinner("Creating semantic index (this may take a few minutes)..."):
+                # Get the chroma path from environment
+                chroma_path = Path(os.getenv("INDEX_PATH", "./data/indices/chroma_db"))
+                
+                # Clear any existing index
+                if chroma_path.exists():
+                    shutil.rmtree(chroma_path, ignore_errors=True)
+                
+                # Create directory with full permissions
+                chroma_path.mkdir(parents=True, exist_ok=True)
+                os.chmod(chroma_path, stat.S_IRWXU | stat.S_IRWXG | stat.S_IRWXO)
+                
+                # Create index
+                index, vector_count = create_vector_index()
+                
+                # Create query engine directly from the new index
+                if index:
+                    from src.query_engine import create_query_engine_from_index
+                    query_engine = create_query_engine_from_index(index)
+                    
+                    # Store in session state
+                    st.session_state.engine = query_engine
+                    st.session_state.index_ready = True
+                    st.session_state.chroma_path = str(chroma_path)
+                    st.success(f"Index created with {vector_count} vectors!")
+                    
+                    # Load chunk metadata
+                    chunk_path = Path(os.getenv("CHUNK_PATH", "./data/chunks"))
+                    for json_file in chunk_path.glob("*.json"):
+                        with open(json_file, 'r') as f:
+                            meta = json.load(f)
+                            st.session_state.paper_metadata[meta["arxiv_id"]] = meta
+                else:
+                    st.error("Failed to create index!")
 
 # Main chat interface
 if st.session_state.index_ready:
@@ -308,9 +293,21 @@ if st.session_state.paper_metadata:
         
         st.code(citation, language="text")
         
-        if st.button("Copy to Clipboard"):
+        # Use Streamlit's clipboard component
+        st.caption("Click the button below to copy the citation to clipboard")
+        if st.button("Copy to Clipboard", key="copy_citation"):
             st.session_state.copied = True
             st.code(citation, language="text")
+            
+            # Add JavaScript clipboard functionality
+            st.markdown(
+                f"""
+                <script>
+                navigator.clipboard.writeText(`{citation}`);
+                </script>
+                """,
+                unsafe_allow_html=True
+            )
             st.success("Citation copied to clipboard!")
 else:
     st.info("Download and process papers to generate citations")
