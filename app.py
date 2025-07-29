@@ -15,6 +15,7 @@ from src.create_index import create_vector_index
 from src.pdf_processor import process_papers
 from src.arxiv_downloader import search_and_download_papers
 from src.citation_generator import generate_apa_citation
+from src.query_engine import create_query_engine_from_index
 from pathlib import Path
 import os
 import time
@@ -139,45 +140,86 @@ with st.sidebar:
                         meta = json.load(f)
                         st.session_state.paper_metadata[meta["arxiv_id"]] = meta
 
-    # Index creation section
     if st.button("Create Vector Index", key="index_btn"):
-        if not api_key:
+        if not os.getenv("OPENAI_API_KEY"):
             st.warning("Please enter your OpenAI API key")
         else:
-            with st.spinner("Creating semantic index (this may take a few minutes)..."):
-                # Get the chroma path from environment
-                chroma_path = Path(os.getenv("INDEX_PATH", "./data/indices/chroma_db"))
-                
-                # Clear any existing index
-                if chroma_path.exists():
-                    shutil.rmtree(chroma_path, ignore_errors=True)
-                
-                # Create directory with full permissions
-                chroma_path.mkdir(parents=True, exist_ok=True)
-                os.chmod(chroma_path, stat.S_IRWXU | stat.S_IRWXG | stat.S_IRWXO)
-                
-                # Create index
+            with st.spinner("Creating semantic index…"):
                 index, vector_count = create_vector_index()
+
+            if index:
+                st.success(f"Indexed {vector_count} vectors!")
+                # build & stash your query engine
+                qe = create_query_engine_from_index(index)
+                st.session_state.engine      = qe
+                st.session_state.index_ready = True
+            else:
+                st.error("Failed to create index!")
+    # if st.button("Create Vector Index", key="index_btn"):
+    #     if not api_key:
+    #         st.warning("Please enter your OpenAI API key")
+    #     else:
+    #         with st.spinner("Creating semantic index (this may take a few minutes)…"):
+    #             # THIS single call both wipes+prepares the folder AND builds the index
+    #             index, vector_count = create_vector_index()
+
+    #         if index:
+    #             st.success(f"Indexed {vector_count} vectors!")
+    #             # build & store your query engine
+    #             query_engine = create_query_engine_from_index(index)
+    #             st.session_state.engine = query_engine
+    #             st.session_state.index_ready = True
+
+    #             # reload your chunk metadata
+    #             chunk_path = Path(os.getenv("CHUNK_PATH", "./data/chunks"))
+    #             for json_file in chunk_path.glob("*.json"):
+    #                 with open(json_file, 'r') as f:
+    #                     meta = json.load(f)
+    #                     st.session_state.paper_metadata[meta["arxiv_id"]] = meta
+    #         else:
+    #             st.error("Failed to create index!")
+    # Index creation section
+    # if st.button("Create Vector Index", key="index_btn"):
+    #     index, count = create_vector_index()
+    #     st.success(f"Indexed {count} vectors.")
+    #     if not api_key:
+    #         st.warning("Please enter your OpenAI API key")
+    #     else:
+    #         with st.spinner("Creating semantic index (this may take a few minutes)..."):
+    #             # Get the chroma path from environment
+    #             chroma_path = Path(os.getenv("INDEX_PATH", "./data/indices/chroma_db"))
                 
-                # Create query engine directly from the new index
-                if index:
-                    from src.query_engine import create_query_engine_from_index
-                    query_engine = create_query_engine_from_index(index)
+    #             # Clear any existing index
+    #             if chroma_path.exists():
+    #                 shutil.rmtree(chroma_path, ignore_errors=True)
+                
+    #             # Create directory with full permissions
+    #             chroma_path.mkdir(parents=True, exist_ok=True)
+    #             os.chmod(chroma_path, stat.S_IRWXU | stat.S_IRWXG | stat.S_IRWXO)
+                
+    #             # Create index
+    #             index, vector_count = create_vector_index()
+                
+    #             # Create query engine directly from the new index
+    #             if index:
+    #                 from src.query_engine import create_query_engine_from_index
+    #                 query_engine = create_query_engine_from_index(index)
                     
-                    # Store in session state
-                    st.session_state.engine = query_engine
-                    st.session_state.index_ready = True
-                    st.session_state.chroma_path = str(chroma_path)
-                    st.success(f"Index created with {vector_count} vectors!")
+    #                 # Store in session state
+    #                 st.session_state.engine = query_engine
+    #                 st.session_state.index_ready = True
+    #                 st.session_state.chroma_path = str(chroma_path)
+    #                 st.success(f"Index created with {vector_count} vectors!")
                     
-                    # Load chunk metadata
-                    chunk_path = Path(os.getenv("CHUNK_PATH", "./data/chunks"))
-                    for json_file in chunk_path.glob("*.json"):
-                        with open(json_file, 'r') as f:
-                            meta = json.load(f)
-                            st.session_state.paper_metadata[meta["arxiv_id"]] = meta
-                else:
-                    st.error("Failed to create index!")
+    #                 # Load chunk metadata
+    #                 chunk_path = Path(os.getenv("CHUNK_PATH", "./data/chunks"))
+    #                 for json_file in chunk_path.glob("*.json"):
+    #                     with open(json_file, 'r') as f:
+    #                         meta = json.load(f)
+    #                         st.session_state.paper_metadata[meta["arxiv_id"]] = meta
+    #             else:
+    #                 st.error("Failed to create index!")
+    
 
 # Main chat interface
 if st.session_state.index_ready:

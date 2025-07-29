@@ -1,183 +1,174 @@
 import os
-from pathlib import Path
-from dotenv import load_dotenv
-from llama_index.core import VectorStoreIndex, StorageContext, Document
-from llama_index.vector_stores.chroma import ChromaVectorStore
-from llama_index.embeddings.openai import OpenAIEmbedding
-import chromadb
-from chromadb.utils import embedding_functions
-from tqdm import tqdm
+import time
 import json
 import hashlib
-import time
 import shutil
 import stat
+from pathlib import Path
+from dotenv import load_dotenv
+from tqdm import tqdm
 
-# Load environment variables
+import chromadb
+from chromadb.utils import embedding_functions
+
+from llama_index.core import VectorStoreIndex, StorageContext
+from llama_index.vector_stores.chroma import ChromaVectorStore
+from llama_index.embeddings.openai import OpenAIEmbedding
+
 load_dotenv()
-
-# Configuration
 EMBED_MODEL = "text-embedding-3-small"
 
+def debug_perms(path: Path):
+    mode = path.stat().st_mode
+    print(f"🔍 perms for {path}: {oct(mode)}")
+
 def create_vector_index():
+    # 1) API key check
     if not os.getenv("OPENAI_API_KEY"):
         print("❌ OPENAI_API_KEY not set in environment")
         return None, 0
 
-    print("🚀 Starting index creation...")
+    print("🚀 Starting index creation…")
     start_time = time.time()
-    
-    # Determine storage location based on environment
+
+    # 2) Choose storage
     if "STREAMLIT_SERVER" in os.environ:
-        persist_dir = "/tmp/chroma_db"
+        persist_dir = Path("/tmp/chroma_db")
     else:
-        persist_dir = os.getenv("INDEX_PATH", "./data/indices/chroma_db")
-    
-    # Ensure clean directory
-    persist_path = Path(persist_dir)
-    if persist_path.exists():
-        shutil.rmtree(persist_path, ignore_errors=True)
-    persist_path.mkdir(parents=True, exist_ok=True)
-    os.chmod(persist_dir, stat.S_IRWXU | stat.S_IRWXG | stat.S_IRWXO)
-    
-    # Initialize ChromaDB
-    chroma_client = chromadb.PersistentClient(
-        path=persist_dir,
-        settings=chromadb.Settings(
-            is_persistent=True,
-            anonymized_telemetry=False,
-            allow_reset=True
+        persist_dir = Path(os.getenv("INDEX_PATH", "./data/indices/chroma_db"))
+    print(f"📁 Using persist_dir = {persist_dir.resolve()}")
+
+    # 3) Before wipe: does it exist?
+    if persist_dir.exists():
+        print(f"⚠️ {persist_dir} already exists!")
+        print("Contents before delete:", persist_dir.iterdir())
+        debug_perms(persist_dir)
+    else:
+        print(f"ℹ️ {persist_dir} does not exist yet.")
+
+    # 4) Wipe it out
+    try:
+        shutil.rmtree(persist_dir, ignore_errors=False)
+        print(f"✅ Removed {persist_dir}")
+    except Exception as e:
+        print(f"❌ Error removing {persist_dir}: {e}")
+
+    # 5) Make directory
+    try:
+        persist_dir.mkdir(parents=True, exist_ok=True)
+        print(f"✅ Created {persist_dir}")
+    except Exception as e:
+        print(f"❌ Error creating {persist_dir}: {e}")
+
+    # 6) Check perms & set them
+    try:
+        debug_perms(persist_dir)
+        os.chmod(persist_dir, stat.S_IRWXU | stat.S_IRWXG | stat.S_IRWXO)
+        print(f"🔧 Applied chmod 0o777 to {persist_dir}")
+        debug_perms(persist_dir)
+    except Exception as e:
+        print(f"❌ chmod error: {e}")
+
+    # 7) Initialize Chroma client
+    try:
+        chroma_client = chromadb.PersistentClient(
+            path=str(persist_dir),
+            settings=chromadb.Settings(
+                is_persistent=True,
+                anonymized_telemetry=False,
+                allow_reset=True
+            )
         )
-    )
-    
-    # Create or get collection WITHOUT embedding function
-    chroma_collection = chroma_client.get_or_create_collection(
-        name="arxiv_papers",
-        metadata={"hnsw:space": "cosine"}
-    )
-    
-    # Get chunk path from environment
-    chunk_path = Path(os.getenv("CHUNK_PATH", "./data/chunks"))
-    
-    # Load and process chunk files
-    chunk_files = list(chunk_path.glob("*.json"))
-    
-    if not chunk_files:
-        print(f"❌ No JSON files found in {chunk_path}. Run PDF processor first.")
+        print("✅ Initialized PersistentClient")
+    except Exception as e:
+        print(f"❌ Error initializing Chroma client: {e}")
         return None, 0
-    
-    # Prepare data for insertion
-    print(f"📚 Processing {len(chunk_files)} papers...")
-    ids = []
-    documents = []
-    metadatas = []
-    embeddings = []
-    
-    # Create embedding function
-    embed_func = embedding_functions.OpenAIEmbeddingFunction(
+
+    try:
+        chroma_collection = chroma_client.get_or_create_collection(
+            name="arxiv_papers",
+            metadata={"hnsw:space": "cosine"}
+        )
+        print("✅ Got/created collection 'arxiv_papers'")
+    except Exception as e:
+        print(f"❌ get_or_create_collection error: {e}")
+        return None, 0
+
+    # 8) Load JSON chunks
+    chunk_path  = Path(os.getenv("CHUNK_PATH", "./data/chunks"))
+    chunk_files = list(chunk_path.glob("*.json"))
+    print(f"📂 Looking for JSONs in {chunk_path.resolve()}")
+    print(f"📑 Found {len(chunk_files)} files")
+    if not chunk_files:
+        return None, 0
+
+    ids, documents, metadatas = [], [], []
+    for cf in tqdm(chunk_files, desc="Reading JSONs"):
+        try:
+            paper = json.loads(cf.read_text())
+        except Exception as e:
+            print(f"⚠️ Skipping {cf}: {e}")
+            continue
+        aid = paper.get("arxiv_id", cf.stem)
+        auth = ", ".join(paper.get("authors", []))
+        for i, txt in enumerate(paper.get("chunks", [])):
+            digest = hashlib.md5(f"{aid}_{i}".encode()).hexdigest()
+            ids.append(digest)
+            documents.append(txt)
+            metadatas.append({
+                "paper_id": aid,
+                "title": paper.get("title", "Untitled"),
+                "chunk_id": i,
+                "file_path": paper.get("file_path", ""),
+                "arxiv_id": aid,
+                "authors": auth,
+                "published": paper.get("published", "")
+            })
+    print(f"🧩 Loaded total chunks: {len(ids)}")
+
+    # 9) Embed + index
+    embed_fn = embedding_functions.OpenAIEmbeddingFunction(
         api_key=os.getenv("OPENAI_API_KEY"),
         model_name=EMBED_MODEL
     )
-    
-    for chunk_file in tqdm(chunk_files, desc="Processing papers"):
-        with open(chunk_file, 'r') as f:
-            try:
-                paper_data = json.load(f)
-            except json.JSONDecodeError:
-                print(f"⚠️ Skipping invalid JSON file: {chunk_file}")
-                continue
-                
-        # Safely get arxiv_id with fallback
-        arxiv_id = paper_data.get("arxiv_id", chunk_file.stem)
-        
-        # Create entries for each chunk
-        for i, chunk_text in enumerate(paper_data["chunks"]):
-            # Create unique ID for each chunk
-            chunk_id = f"{arxiv_id}_{i}"
-            doc_id = hashlib.md5(chunk_id.encode()).hexdigest()
+    batch_sz = 500
+    for i in tqdm(range(0, len(ids), batch_sz), desc="Embedding & Indexing"):
+        batch_ids   = ids[i:i+batch_sz]
+        batch_docs  = documents[i:i+batch_sz]
+        batch_mets  = metadatas[i:i+batch_sz]
+        try:
+            batch_embs = embed_fn(batch_docs)
+            chroma_collection.add(
+                ids=batch_ids,
+                documents=batch_docs,
+                embeddings=batch_embs,
+                metadatas=batch_mets
+            )
+        except Exception as e:
+            print(f"❌ Error in batch {i//batch_sz}: {e}")
+            # inspect persist_dir right after failure
+            print("Contents now:", list(persist_dir.iterdir()))
+            debug_perms(persist_dir)
+            return None, 0
 
-            authors_list = paper_data.get("authors", [])
-            authors_str = ", ".join(authors_list)
-            
-            # Generate embedding
-            embedding = embed_func([chunk_text])[0]
-            
-            ids.append(doc_id)
-            documents.append(chunk_text)
-            embeddings.append(embedding)
-            metadatas.append({
-                "paper_id": arxiv_id,
-                "title": paper_data.get("title", "Untitled Paper"),
-                "chunk_id": i,
-                "file_path": paper_data.get("file_path", ""),
-                "arxiv_id": arxiv_id,
-                "authors": authors_str,
-                "published": paper_data.get("published", "")
-            })
-    
-    print(f"🧩 Total chunks to index: {len(ids)}")
-    
-    # Batch insertion
-    batch_size = 100
-    for i in tqdm(range(0, len(ids), batch_size), desc="Indexing chunks"):
-        batch_ids = ids[i:i+batch_size]
-        batch_docs = documents[i:i+batch_size]
-        batch_embeddings = embeddings[i:i+batch_size]
-        batch_metas = metadatas[i:i+batch_size]
-        
-        chroma_collection.add(
-            ids=batch_ids,
-            documents=batch_docs,
-            embeddings=batch_embeddings,
-            metadatas=batch_metas
-        )
-    
-    # Create LlamaIndex wrapper
-    vector_store = ChromaVectorStore(chroma_collection=chroma_collection)
-    storage_context = StorageContext.from_defaults(vector_store=vector_store)
-    
-    # Explicitly create embedding model
-    embed_model = OpenAIEmbedding(model=EMBED_MODEL)
-    
-    # Create index with explicit embed_model
-    index = VectorStoreIndex.from_vector_store(
-        vector_store, 
-        storage_context=storage_context,
-        embed_model=embed_model
-    )
-    
-    # Calculate cost metrics
-    vector_count = chroma_collection.count()
-    approx_tokens_per_chunk = 300
-    total_tokens = vector_count * approx_tokens_per_chunk
-    embedding_cost = (total_tokens / 1000) * 0.00002
-    
-    elapsed = time.time() - start_time
-    
-    print(f"\n✅ Index creation complete!")
-    print(f"   Total vectors: {vector_count}")
-    print(f"   Time taken: {elapsed:.1f} seconds")
-    print(f"   Estimated tokens processed: {total_tokens}")
-    print(f"   Estimated embedding cost: ${embedding_cost:.6f}")
-    
-    return index, vector_count
+    # 10) Wrap in LlamaIndex
+    try:
+        vs = ChromaVectorStore(chroma_collection=chroma_collection)
+        sc = StorageContext.from_defaults(vector_store=vs)
+        em = OpenAIEmbedding(model=EMBED_MODEL)
+        index = VectorStoreIndex.from_vector_store(vs, storage_context=sc, embed_model=em)
+    except Exception as e:
+        print(f"❌ LlamaIndex wrapper error: {e}")
+        return None, 0
+
+    vec_count = chroma_collection.count()
+    elapsed   = time.time() - start_time
+    print(f"\n✅ Complete: {vec_count} vectors in {elapsed:.1f}s")
+
+    return index, vec_count
+
 
 if __name__ == "__main__":
-    # Clear previous index data
-    chroma_db_path = Path("./data/indices/chroma_db")
-    if chroma_db_path.exists():
-        print("🧹 Cleaning up previous index data...")
-        shutil.rmtree(chroma_db_path)
-    
-    index, vector_count = create_vector_index()
-    
-    if index and vector_count > 0:
-        print("\n🔍 Testing query functionality...")
-        query_engine = index.as_query_engine(similarity_top_k=1)
-        test_response = query_engine.query("What is the main topic?")
-        print(f"   Test response: {test_response.response[:150]}...")
-        print("\n🎉 Index is ready for querying!")
-        
-        print(f"\n✅ Successfully created index with {vector_count} vectors")
-        print(f"🔑 Vector store persisted at: ./data/indices/chroma_db")
-        print(f"💡 Estimated embedding cost: ${vector_count * 0.0000001:.6f}")
+    idx, cnt = create_vector_index()
+    if idx:
+        print(f"🎉 CLI run created {cnt} vectors.")
