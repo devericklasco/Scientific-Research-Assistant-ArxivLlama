@@ -4,7 +4,6 @@ sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
 import sqlite3
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
-# Disable ChromaDB telemetry
 import chromadb
 # chromadb.utils.embedding_functions.DEFAULT_EMBEDDING_FUNC = None
 # chromadb.utils.embedding_functions.DefaultEmbeddingFunction = None
