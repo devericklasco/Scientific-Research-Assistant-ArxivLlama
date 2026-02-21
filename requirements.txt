@@ -10,7 +10,7 @@ chromadb
 tqdm
 tiktoken
 streamlit
-pysqlite3-binary>=0.4.7
+pysqlite3-binary>=0.4.7; python_version < "3.13"
 pyyaml>=6.0
 
 # sqlite3
