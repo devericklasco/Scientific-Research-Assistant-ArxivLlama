@@ -6,343 +6,65 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
-
-import chromadb
-import tiktoken
-from dotenv import load_dotenv
-from llama_index.core import StorageContext, VectorStoreIndex
-from llama_index.embeddings.openai import OpenAIEmbedding
-from llama_index.llms.openai import OpenAI
-from llama_index.vector_stores.chroma import ChromaVectorStore
-
 project_root = Path(__file__).parent.parent
 sys.path.append(str(project_root))
+from llama_index.core import VectorStoreIndex, StorageContext
+from llama_index.vector_stores.faiss import FaissVectorStore
+from llama_index.llms.openai import OpenAI
+from llama_index.embeddings.openai import OpenAIEmbedding
+from llama_index.core import Settings
+import tiktoken
+import time
+# import faiss
+import json
+from src.citation_generator import generate_apa_citation
+import os
+from dotenv import load_dotenv
 
 load_dotenv()
 
+# Configuration
 EMBED_MODEL = "text-embedding-3-small"
-LOCAL_EMBED_MODEL = "all-MiniLM-L6-v2"
-DEFAULT_SIMILARITY_TOP_K = int(os.getenv("SIMILARITY_TOP_K", 5))
-MIN_GROUNDING_SCORE = float(os.getenv("MIN_GROUNDING_SCORE", 0.2))
-SEMANTIC_WEIGHT = float(os.getenv("SEMANTIC_WEIGHT", 0.62))
-LEXICAL_WEIGHT = float(os.getenv("LEXICAL_WEIGHT", 0.23))
-RECENCY_WEIGHT = float(os.getenv("RECENCY_WEIGHT", 0.15))
-
-def get_collection_name() -> str:
-    return os.getenv("CHROMA_COLLECTION_NAME", "arxiv_papers")
-
-def get_embedding_backend() -> str:
-    backend = os.getenv("EMBEDDING_BACKEND", "openai").strip().lower()
-    return backend if backend in {"openai", "local"} else "openai"
-
-
-@dataclass
-class ScoredSourceNode:
-    text: str
-    metadata: Dict
-    score: float
-    semantic_score: float
-    lexical_score: float
-    recency_score: float
-
-
-@dataclass
-class GroundedResponse:
-    response: str
-    source_nodes: List[ScoredSourceNode]
-    grounded: bool
-
+INDEX_PATH = Path(os.getenv("INDEX_PATH", "./data/indices"))
 
 def count_tokens(text: str) -> int:
     encoder = tiktoken.get_encoding("cl100k_base")
     return len(encoder.encode(text))
 
-
-def tokenize_for_search(text: str) -> List[str]:
-    return [t for t in re.split(r"[^a-zA-Z0-9]+", text.lower()) if len(t) >= 2]
-
-
-def lexical_overlap_score(query: str, document: str) -> float:
-    q_tokens = tokenize_for_search(query)
-    d_tokens = tokenize_for_search(document)
-    if not q_tokens or not d_tokens:
-        return 0.0
-    q_set = set(q_tokens)
-    d_set = set(d_tokens)
-    overlap = len(q_set & d_set)
-    return overlap / max(1, len(q_set))
-
-
-def compute_recency_score(published: str) -> float:
-    if not published:
-        return 0.0
-    try:
-        published_dt = datetime.strptime(published, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-    except ValueError:
-        return 0.0
-    age_days = (datetime.now(timezone.utc) - published_dt).days
-    if age_days <= 0:
-        return 1.0
-    if age_days >= 3650:
-        return 0.0
-    return 1.0 - (age_days / 3650.0)
-
-
-def combine_scores(semantic_score: float, lexical_score: float, recency_score: float) -> float:
-    return (
-        SEMANTIC_WEIGHT * semantic_score
-        + LEXICAL_WEIGHT * lexical_score
-        + RECENCY_WEIGHT * recency_score
-    )
-
-
-def should_return_insufficient_evidence(source_nodes: List[ScoredSourceNode]) -> bool:
-    if not source_nodes:
-        return True
-    strongest = max(node.score for node in source_nodes)
-    return strongest < MIN_GROUNDING_SCORE
-
-
-class HybridResearchEngine:
-    def __init__(
-        self,
-        chroma_collection: chromadb.Collection,
-        similarity_top_k: int = DEFAULT_SIMILARITY_TOP_K,
-    ) -> None:
-        self.collection = chroma_collection
-        self.similarity_top_k = similarity_top_k
-        self.embedding_backend = get_embedding_backend()
-        self._llm = None
-        self._query_embedder = None
-        if os.getenv("OPENAI_API_KEY"):
-            self._llm = OpenAI(model="gpt-4o", temperature=0.1)
-        if self.embedding_backend == "openai" and os.getenv("OPENAI_API_KEY"):
-            self._query_embedder = OpenAIEmbedding(model=EMBED_MODEL)
-
-    def retrieve(self, query: str, top_k: Optional[int] = None) -> List[ScoredSourceNode]:
-        k = top_k or self.similarity_top_k
-        try:
-            if self.embedding_backend == "openai" and self._query_embedder is not None:
-                query_embedding = self._query_embedder.get_text_embedding(query)
-                raw = self.collection.query(
-                    query_embeddings=[query_embedding],
-                    n_results=max(k * 4, 20),
-                    include=["documents", "metadatas", "distances"],
-                )
-            else:
-                raw = self.collection.query(
-                    query_texts=[query],
-                    n_results=max(k * 4, 20),
-                    include=["documents", "metadatas", "distances"],
-                )
-        except Exception as exc:
-            if "dimension" in str(exc).lower():
-                raise RuntimeError(
-                    "Embedding dimension mismatch between your index and query backend. "
-                    "Set EMBEDDING_BACKEND consistently and recreate the vector index."
-                ) from exc
-            raise
-        documents = raw.get("documents", [[]])[0]
-        metadatas = raw.get("metadatas", [[]])[0]
-        distances = raw.get("distances", [[]])[0]
-
-        candidates: List[ScoredSourceNode] = []
-        for i, text in enumerate(documents):
-            metadata = metadatas[i] or {}
-            distance = float(distances[i]) if i < len(distances) else 1.0
-            semantic_score = max(0.0, 1.0 - distance)
-            lex_score = lexical_overlap_score(query, text)
-            recency = compute_recency_score(str(metadata.get("published", "")))
-            final_score = combine_scores(semantic_score, lex_score, recency)
-            candidates.append(
-                ScoredSourceNode(
-                    text=text,
-                    metadata=metadata,
-                    score=final_score,
-                    semantic_score=semantic_score,
-                    lexical_score=lex_score,
-                    recency_score=recency,
-                )
-            )
-        candidates.sort(key=lambda c: c.score, reverse=True)
-        return candidates[:k]
-
-    def _fallback_answer(self, question: str, sources: List[ScoredSourceNode]) -> str:
-        snippets = []
-        for idx, source in enumerate(sources[:3], start=1):
-            title = source.metadata.get("title", "Untitled")
-            snippets.append(f"[S{idx}] {title}: {source.text[:240]}...")
-        return (
-            "OpenAI API key is not configured, so this is an extractive summary only.\n\n"
-            f"Question: {question}\n\n"
-            + "\n".join(snippets)
-        )
-
-    def _build_grounded_prompt(self, question: str, sources: List[ScoredSourceNode]) -> str:
-        context_lines = []
-        for idx, source in enumerate(sources, start=1):
-            md = source.metadata
-            title = md.get("title", "Untitled")
-            published = md.get("published", "Unknown")
-            page_start = md.get("page_start", -1)
-            section = md.get("section", "content")
-            context_lines.append(
-                f"[S{idx}] title={title} | published={published} | page={page_start} | section={section}\n{source.text}"
-            )
-        context = "\n\n".join(context_lines)
-        return (
-            "You are a careful research assistant. Answer ONLY from the provided sources.\n"
-            "Rules:\n"
-            "1) If evidence is insufficient, say exactly: 'Insufficient evidence in indexed papers.'\n"
-            "2) Cite every key claim with source tags like [S1], [S2].\n"
-            "3) Keep answer concise and technical.\n\n"
-            f"Question:\n{question}\n\n"
-            f"Sources:\n{context}\n"
-        )
-
-    def query(self, question: str) -> GroundedResponse:
-        sources = self.retrieve(question, top_k=self.similarity_top_k)
-        if should_return_insufficient_evidence(sources):
-            return GroundedResponse(
-                response=(
-                    "Insufficient evidence in indexed papers. "
-                    "Try rephrasing the question, expanding the paper set, or lowering recency filters."
-                ),
-                source_nodes=sources,
-                grounded=False,
-            )
-
-        if self._llm is None:
-            return GroundedResponse(
-                response=self._fallback_answer(question, sources),
-                source_nodes=sources,
-                grounded=True,
-            )
-
-        prompt = self._build_grounded_prompt(question, sources)
-        response = self._llm.complete(prompt).text
-        return GroundedResponse(response=response.strip(), source_nodes=sources, grounded=True)
-
-    def recommend_papers(self, topic: str, num_papers: int = 3) -> str:
-        sources = self.retrieve(topic, top_k=max(num_papers * 4, 12))
-        by_paper: Dict[str, ScoredSourceNode] = {}
-        for source in sources:
-            paper_id = source.metadata.get("arxiv_id", "unknown")
-            existing = by_paper.get(paper_id)
-            if existing is None or source.score > existing.score:
-                by_paper[paper_id] = source
-
-        ranked = sorted(by_paper.values(), key=lambda s: s.score, reverse=True)[:num_papers]
-        bullets = []
-        for source in ranked:
-            md = source.metadata
-            bullets.append(
-                f"- **{md.get('title', 'Untitled')}** ({md.get('published', 'Unknown')}) "
-                f"[{md.get('arxiv_id', 'N/A')}]\n"
-                f"  - Why: score={source.score:.3f}, section={md.get('section', 'content')}\n"
-                f"  - Evidence: {source.text[:220]}..."
-            )
-        return "\n".join(bullets) if bullets else "No recommendations available."
-
-    def compare_papers(self, comparison_topic: str, num_papers: int = 3) -> str:
-        sources = self.retrieve(comparison_topic, top_k=max(12, num_papers * 4))
-        by_paper: Dict[str, ScoredSourceNode] = {}
-        for source in sources:
-            paper_id = source.metadata.get("arxiv_id", "unknown")
-            current = by_paper.get(paper_id)
-            if current is None or source.score > current.score:
-                by_paper[paper_id] = source
-        ranked = sorted(by_paper.values(), key=lambda s: s.score, reverse=True)[:num_papers]
-        if not ranked:
-            return "No papers found for comparison."
-
-        rows = ["| Paper | Published | Signal | Evidence |", "|---|---|---|---|"]
-        for node in ranked:
-            md = node.metadata
-            rows.append(
-                f"| {md.get('title', 'Untitled')} | {md.get('published', 'Unknown')} | "
-                f"{md.get('section', 'content')} (score {node.score:.2f}) | {node.text[:140].replace('|', ' ')}... |"
-            )
-        return "\n".join(rows)
-
-    def extract_claims_with_evidence(self, topic: str, max_claims: int = 5) -> List[Dict]:
-        sources = self.retrieve(topic, top_k=max(max_claims * 3, 12))
-        claims: List[Dict] = []
-        for source in sources[:max_claims]:
-            md = source.metadata
-            sentence = source.text.split(".")[0].strip()
-            if not sentence:
-                sentence = source.text[:120]
-            claims.append(
-                {
-                    "claim": sentence,
-                    "evidence": source.text[:260],
-                    "arxiv_id": md.get("arxiv_id", ""),
-                    "title": md.get("title", ""),
-                    "published": md.get("published", ""),
-                    "page_start": md.get("page_start", -1),
-                    "page_end": md.get("page_end", -1),
-                    "score": round(source.score, 4),
-                }
-            )
-        return claims
-
-
-def _extract_collection_from_index(index: VectorStoreIndex) -> Optional[chromadb.Collection]:
-    vector_store = getattr(index, "_vector_store", None) or getattr(index, "vector_store", None)
-    if vector_store is None:
-        return None
-    for attr in ("_collection", "collection", "chroma_collection"):
-        collection = getattr(vector_store, attr, None)
-        if collection is not None:
-            return collection
-    return None
-
-
-def create_query_engine_from_index(index: VectorStoreIndex):
-    chroma_collection = _extract_collection_from_index(index)
-    if chroma_collection is None:
-        if os.getenv("OPENAI_API_KEY"):
-            llm = OpenAI(model="gpt-4o", temperature=0.1)
-            return index.as_query_engine(llm=llm, similarity_top_k=3, response_mode="compact")
-        return index.as_query_engine(similarity_top_k=3, response_mode="compact")
-    return HybridResearchEngine(chroma_collection=chroma_collection)
-
-
-def initialize_engine() -> Tuple[Optional[HybridResearchEngine], Optional[VectorStoreIndex], Optional[chromadb.Collection]]:
-    if not os.getenv("OPENAI_API_KEY"):
-        print("❌ OPENAI_API_KEY not set in environment")
-        return None, None, None
-
-    persist_dir = "/tmp/chroma_db" if "STREAMLIT_SERVER" in os.environ else os.getenv("INDEX_PATH", "./data/indices/chroma_db")
-    chroma_client = chromadb.PersistentClient(
-        path=persist_dir,
-        settings=chromadb.Settings(is_persistent=True, anonymized_telemetry=False),
-    )
-
-    try:
-        chroma_collection = chroma_client.get_collection(get_collection_name())
-    except chromadb.errors.NotFoundError:
-        print(f"❌ Collection '{get_collection_name()}' not found at {persist_dir}")
-        return None, None, None
-
-    vector_store = ChromaVectorStore(chroma_collection=chroma_collection)
+def initialize_engine():
+    """Initialize the FAISS-based query engine"""
+    # Load FAISS index from disk
+    # Load FAISS index directly
+    faiss_index = faiss.read_index(str(INDEX_PATH / "faiss_index.bin"))
+    # vector_store = FaissVectorStore.from_persist_dir(str(INDEX_PATH / "faiss_index"))
+    # Create vector store
+    vector_store = FaissVectorStore.from_persist_dir(
+        persist_dir=str(INDEX_PATH / "faiss_vector_store"))
+    vector_store.faiss_index = faiss_index
     storage_context = StorageContext.from_defaults(vector_store=vector_store)
-    embed_model = OpenAIEmbedding(model=EMBED_MODEL)
+    
+    
+    # Configure embedding model
+    Settings.embed_model = OpenAIEmbedding(model=EMBED_MODEL)
+    
+    # Create index
     index = VectorStoreIndex.from_vector_store(
         vector_store,
         storage_context=storage_context,
         embed_model=embed_model,
     )
-    query_engine = HybridResearchEngine(chroma_collection=chroma_collection)
-    return query_engine, index, chroma_collection
-
+    
+    # Create query engine with GPT-4o
+    llm = OpenAI(model="gpt-4o", temperature=0.1)
+    query_engine = index.as_query_engine(
+        llm=llm,
+        similarity_top_k=3,
+        response_mode="compact"
+    )
+    return query_engine
 
 def get_paper_recommendations(query_engine, topic: str, num_papers: int = 3) -> str:
-    if hasattr(query_engine, "recommend_papers"):
-        return query_engine.recommend_papers(topic, num_papers=num_papers)
-
+    """Get paper recommendations based on research topic"""
     prompt = (
         f"Based on the research topic: '{topic}', recommend {num_papers} papers from the collection. "
         "For each recommendation, include:\n"
@@ -355,23 +77,34 @@ def get_paper_recommendations(query_engine, topic: str, num_papers: int = 3) -> 
     return response.response if hasattr(response, "response") else str(response)
 
 
-def get_paper_metadata(chroma_collection: chromadb.Collection, paper_id: str) -> dict:
-    result = chroma_collection.get(ids=[paper_id], include=["metadatas"])
-    if result and result["metadatas"]:
-        return result["metadatas"][0]
-    return {}
+def load_paper_metadata():
+    """Load paper metadata from chunk files"""
+    metadata = {}
+    chunk_path = Path(os.getenv("CHUNK_PATH", "./data/chunks"))
+    
+    for json_file in chunk_path.glob("*.json"):
+        with open(json_file, 'r') as f:
+            try:
+                paper_data = json.load(f)
+                metadata[paper_data["arxiv_id"]] = paper_data
+            except (json.JSONDecodeError, KeyError):
+                continue
+    return metadata
+
+# CLI functionality removed since app.py is the main interface
+# FAISS doesn't support direct metadata retrieval by ID like Chroma did
+# Metadata is now managed through load_paper_metadata() and session state in app.py
 
 
 if __name__ == "__main__":
     print("Initializing research assistant...")
-    engine, index, chroma_collection = initialize_engine()
-    if not engine:
-        print("❌ Failed to initialize query engine. Please create an index first.")
-        raise SystemExit(1)
-
+    engine = initialize_engine()
+    paper_metadata = load_paper_metadata()
     print("✅ System ready. Type your questions about the research papers.")
-    print("Type 'exit' to quit, '!recommend' for paper recommendations, '!compare' for comparisons.")
-
+    print("   Type 'exit' to quit or '!recommend' for paper recommendations\n")
+    
+    total_cost = 0.0
+    
     while True:
         query = input("\n📝 Your research question: ").strip()
         if query.lower() in {"exit", "quit"}:
@@ -380,18 +113,45 @@ if __name__ == "__main__":
             topic = query.replace("!recommend", "").strip() or "machine learning"
             print(engine.recommend_papers(topic))
             continue
-        if query.startswith("!compare"):
-            topic = query.replace("!compare", "").strip() or "method comparisons"
-            print(engine.compare_papers(topic))
-            continue
-
-        answer = engine.query(query)
-        print(f"\n💡 Answer:\n{answer.response}")
-        if answer.source_nodes:
+     
+        # Track query cost
+        start_time = time.time()
+        response = engine.query(query)
+        elapsed = time.time() - start_time
+        
+        context_text = " ".join([n.text for n in response.source_nodes]) if response.source_nodes else ""
+        input_tokens = count_tokens(query + context_text)
+        output_tokens = count_tokens(response.response)
+        
+        # Updated pricing for GPT-4o (May 2024 pricing)
+        input_cost_per_token = 5 / 1_000_000  # $5 per 1M tokens
+        output_cost_per_token = 15 / 1_000_000  # $15 per 1M tokens
+        cost = (input_tokens * input_cost_per_token) + (output_tokens * output_cost_per_token)
+        total_cost += cost
+        
+        print(f"\n💡 Answer ({elapsed:.1f}s, ${cost:.6f}):")
+        print(response.response)
+        
+        if response.source_nodes:
             print("\n🔍 Sources:")
-            for i, source in enumerate(answer.source_nodes, start=1):
-                md = source.metadata or {}
-                print(
-                    f"{i}. [{md.get('arxiv_id', 'unknown')}] {md.get('title', 'Untitled')} "
-                    f"(score={source.score:.3f}, page={md.get('page_start', -1)})"
-                )
+            for i, source in enumerate(response.source_nodes, 1):
+                metadata = source.metadata or {}
+                source_id = metadata.get("arxiv_id", "unknown")
+                
+                # Get full metadata from loaded paper data
+                paper_meta = paper_metadata.get(source_id, {})
+                title = paper_meta.get("title", metadata.get("title", "Untitled Paper"))
+                authors = paper_meta.get("authors", metadata.get("authors", "Unknown authors"))
+                
+                print(f"{i}. [{source_id}] {title}")
+                print(f"   Authors: {authors}")
+                print(f"   Relevance: {source.score or 0.0:.3f}")
+                print(f"   Excerpt: {source.text[:150]}...")
+                
+                # Generate citation
+                citation = generate_apa_citation(paper_meta or metadata)
+                print(f"   Citation: {citation[:60]}...")
+        else:
+            print("\n🔍 No sources found for this response")
+    
+    print(f"\nℹ️ Total session cost: ${total_cost:.6f}")

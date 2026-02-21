@@ -1,23 +1,3 @@
-import sys
-
-# Prefer pysqlite3 when available (helps older environments), but fall back to
-# stdlib sqlite3 for Python/platforms where pysqlite3-binary wheels are absent.
-try:
-    import pysqlite3  # type: ignore
-
-    sys.modules["sqlite3"] = pysqlite3
-except Exception:
-    pass
-
-import csv
-import html
-import io
-import json
-import os
-import re
-import shutil
-import stat
-import time
 import warnings
 from pathlib import Path
 from uuid import uuid4
@@ -37,16 +17,37 @@ from src.query_engine import create_query_engine_from_index, get_paper_recommend
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
+# Configuration
+INDEX_PATH = Path(os.getenv("INDEX_PATH", "./data/indices"))
+CHUNK_PATH = Path(os.getenv("CHUNK_PATH", "./data/chunks"))
+PAPERS_PATH = Path(os.getenv("DATA_PATH", "./data/papers"))
+
+# Configure Streamlit
 st.set_page_config(page_title="ArxivLlama", page_icon="🦙", layout="wide")
 st.title("🦙 ArxivLlama - RAG Powered Scientific Research Assistant")
 
-WORKSPACE_TTL_SECONDS = int(os.getenv("WORKSPACE_TTL_SECONDS", 2 * 60 * 60))
-WORKSPACE_CLEANUP_COOLDOWN_SECONDS = int(os.getenv("WORKSPACE_CLEANUP_COOLDOWN_SECONDS", 60))
-WORKSPACE_STATE_FILENAME = ".workspace_state.json"
+def cleanup_faiss_index():
+    """Clean up previous index files"""
+    files_to_remove = [
+        INDEX_PATH / "faiss_index.bin",
+        INDEX_PATH / "docstore.json",
+        INDEX_PATH / "graph_store.json",
+        INDEX_PATH / "index_store.json",
+        INDEX_PATH / "vector_store.json"
+    ]
+    for file_path in files_to_remove:
+        try:
+            if file_path.exists():
+                file_path.unlink()
+        except Exception as e:
+            st.error(f"Couldn't remove {file_path}: {str(e)}")
+            return False
+    return True
 
+
+# Initialize session state
 if "engine" not in st.session_state:
     st.session_state.engine = None
-if "index_ready" not in st.session_state:
     st.session_state.index_ready = False
 if "paper_metadata" not in st.session_state:
     st.session_state.paper_metadata = {}
@@ -269,6 +270,19 @@ if (time.time() - st.session_state.last_cleanup_check_ts) >= WORKSPACE_CLEANUP_C
     st.session_state.last_cleanup_check_ts = time.time()
 
 
+def load_paper_metadata():
+    """Load paper metadata from chunk files"""
+    metadata = {}
+    for json_file in CHUNK_PATH.glob("*.json"):
+        with open(json_file, 'r') as f:
+            try:
+                meta = json.load(f)
+                metadata[meta["arxiv_id"]] = meta
+            except (json.JSONDecodeError, KeyError):
+                continue
+    return metadata
+
+# Sidebar for setup
 with st.sidebar:
     st.header("⚙️ Configuration")
     embedding_backend = st.radio(
@@ -299,41 +313,61 @@ with st.sidebar:
         if st.button("Download Papers", key="download_btn"):
             if not topic:
                 st.warning("Please enter a research topic")
+            elif not api_key:
+                st.warning("Please enter your OpenAI API key")
             else:
-                with st.spinner("Preparing a new isolated workspace..."):
-                    start_new_workspace(embedding_backend=embedding_backend)
-                with st.spinner(f"Downloading up to {max_results} papers..."):
-                    papers = search_and_download_papers(
-                        query=topic,
-                        max_results=max_results,
-                        max_age_days=max_age_years * 365,
-                        sort_by_recent=sort_by_recent,
-                        dedupe=True,
-                    )
-                st.success(f"Downloaded {len(papers)} papers.")
-                st.session_state.paper_metadata.update({m["arxiv_id"]: m for m in papers.values()})
-
+                with st.spinner(f"Downloading {max_results} papers..."):
+                    papers = search_and_download_papers(topic, max_results)
+                    if papers:
+                        st.success(f"Downloaded {len(papers)} papers!")
+                        st.session_state.paper_metadata.update(
+                            {meta['arxiv_id']: meta for _, meta in papers.items()}
+                        )
+                    else:
+                        st.error("Failed to download papers")
+    
+    # Processing section
     if st.button("Process PDFs", key="process_btn"):
-        with st.spinner("Extracting text and creating token-aware chunks..."):
-            result = process_papers()
-        st.success(f"Processed {len(result)} papers into chunk records.")
-        load_metadata_from_disk(reset=True)
-
-    force_rebuild = st.checkbox("Force full re-index (skip incremental mode)", value=False)
-    if st.button("Create Vector Index", key="index_btn"):
-        if embedding_backend == "openai" and not os.getenv("OPENAI_API_KEY"):
-            st.warning("OpenAI backend selected: please enter your OpenAI API key.")
+        if not api_key:
+            st.warning("Please enter your OpenAI API key")
         else:
-            with st.spinner("Creating semantic index..."):
-                index, vector_count = create_vector_index(force_rebuild=force_rebuild)
-            if index:
-                st.success(f"Index ready with {vector_count} vectors.")
-                st.session_state.engine = create_query_engine_from_index(index)
-                st.session_state.index_ready = True
-            else:
-                st.error("Failed to create index.")
+            with st.spinner("Extracting text and creating chunks..."):
+                result = process_papers()
+                if result:
+                    st.success(f"Processed {len(result)} papers into chunks!")
+                    st.session_state.paper_metadata = load_paper_metadata()
+                else:
+                    st.error("No papers processed - check PDF directory")
 
+    # Index creation section
+    if st.button("Create Vector Index", key="index_btn"):
+        if not api_key:
+            st.warning("Please enter your OpenAI API key")
+        else:
+            with st.spinner("Creating semantic index (this may take a few minutes)..."):
+                # Clear previous index
+                faiss_index_path = INDEX_PATH / "faiss_index"
+                try:
+                    # Handle both directory and file cases
+                    if faiss_index_path.exists():
+                        if faiss_index_path.is_dir():
+                            shutil.rmtree(faiss_index_path)
+                        else:
+                            faiss_index_path.unlink()
+                    
+                    # Create parent directory if it doesn't exist
+                    INDEX_PATH.mkdir(parents=True, exist_ok=True)
+                    
+                    index, vector_count = create_vector_index()
+                    st.session_state.engine = initialize_engine()
+                    st.session_state.index_ready = True
+                    st.session_state.paper_metadata = load_paper_metadata()
+                    st.success(f"Index created with {vector_count} vectors!")
+                except Exception as e:
+                    st.error(f"Index creation failed: {str(e)}")
+                    st.error("Please check the index directory permissions")
 
+# Main chat interface
 if st.session_state.index_ready:
     st.subheader("💬 Research Assistant")
     st.caption("Answers are grounded with source metadata and page-level evidence when available.")
@@ -345,52 +379,67 @@ if st.session_state.index_ready:
                 with st.expander("View Sources & Citations"):
                     for i, source in enumerate(message["sources"], start=1):
                         metadata = source["metadata"]
-                        st.markdown(f"**Source {i}:** {metadata.get('title', 'Untitled')}")
-                        st.caption(
-                            f"Authors: {', '.join(metadata.get('authors', [])) if isinstance(metadata.get('authors'), list) else metadata.get('authors', 'Unknown')}"
-                        )
-                        st.caption(
-                            f"Published: {metadata.get('published', 'Unknown')} | "
-                            f"Page: {metadata.get('page_start', 'N/A')} | Section: {metadata.get('section', 'content')} | "
-                            f"Score: {source.get('score', 0.0):.3f}"
-                        )
-                        st.code(generate_apa_citation(metadata), language="text")
-                        st.caption(f"Excerpt: {source['text'][:260]}...")
+                        st.markdown(f"**Source {i}:**")
+                        st.caption(f"**Title:** {metadata.get('title', 'Untitled')}")
+                        st.caption(f"**Authors:** {metadata.get('authors', 'Unknown')}")
+                        st.caption(f"**Published:** {metadata.get('published', 'Unknown')}")
+                        
+                        # Generate and display citation
+                        citation = generate_apa_citation(metadata)
+                        st.code(citation, language="text")
+                        
+                        st.caption(f"**Excerpt:** {source['text'][:200]}...")
                         st.divider()
-
-    if prompt := st.chat_input("Ask a question about your indexed papers"):
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.markdown(prompt)
-
-        with st.chat_message("assistant"):
-            placeholder = st.empty()
-            start_time = time.time()
-            response = st.session_state.engine.query(prompt)
-            elapsed = time.time() - start_time
-            placeholder.markdown(f"{response.response}\n\n_Time: {elapsed:.2f}s_")
-            if hasattr(response, "grounded") and not response.grounded:
-                st.warning("Low-confidence answer: insufficient evidence in retrieved context.")
-
-            sources = []
-            if getattr(response, "source_nodes", None):
-                for source in response.source_nodes:
-                    paper_id = source.metadata.get("arxiv_id", "")
-                    metadata = st.session_state.paper_metadata.get(paper_id, source.metadata)
-                    sources.append(
-                        {
-                            "text": source.text,
-                            "metadata": metadata,
-                            "score": source.score or 0.0,
-                        }
-                    )
-            st.session_state.messages.append(
-                {
-                    "role": "assistant",
-                    "content": response.response,
-                    "sources": sources,
-                }
-            )
+    
+    # Accept user input
+    if prompt := st.chat_input("Your research question"):
+        if not prompt.strip():
+            st.warning("Please enter a question")
+        else:
+            # Add user message to chat history
+            st.session_state.messages.append({"role": "user", "content": prompt})
+            
+            # Display user message
+            with st.chat_message("user"):
+                st.markdown(prompt)
+            
+            # Get assistant response
+            with st.chat_message("assistant"):
+                message_placeholder = st.empty()
+                full_response = ""
+                
+                try:
+                    start_time = time.time()
+                    response = st.session_state.engine.query(prompt)
+                    elapsed = time.time() - start_time
+                    
+                    # Display response
+                    full_response += f"{response.response}\n\n"
+                    message_placeholder.markdown(full_response)
+                    
+                    # Prepare sources for display
+                    sources = []
+                    if response.source_nodes:
+                        for source in response.source_nodes:
+                            paper_id = source.metadata.get("arxiv_id", "")
+                            metadata = st.session_state.paper_metadata.get(
+                                paper_id, 
+                                source.metadata
+                            )
+                            sources.append({
+                                "text": source.text,
+                                "metadata": metadata,
+                                "score": source.score or 0.0
+                            })
+                    
+                    # Add assistant response to chat history
+                    st.session_state.messages.append({
+                        "role": "assistant", 
+                        "content": full_response,
+                        "sources": sources
+                    })
+                except Exception as e:
+                    st.error(f"Error processing query: {str(e)}")
 else:
     st.info("Please configure and create an index using the sidebar controls.")
 
@@ -398,43 +447,24 @@ else:
 st.divider()
 st.subheader("📚 Paper Recommendations")
 if st.session_state.index_ready:
-    rec_topic = st.text_input("Recommendation topic", placeholder="e.g., retrieval-augmented generation")
-    num_papers = st.slider("Number of recommendations", 1, 10, 4)
+    rec_topic = st.text_input("Enter research topic for recommendations", 
+                            placeholder="e.g., transformer architectures")
+    num_papers = st.slider("Number of recommendations", 1, 10, 3)
+    
     if st.button("Get Recommendations"):
-        if not rec_topic:
-            st.warning("Please enter a topic.")
+        if not rec_topic.strip():
+            st.warning("Please enter a research topic")
         else:
             with st.spinner("Finding relevant papers..."):
-                st.markdown(get_paper_recommendations(st.session_state.engine, rec_topic, num_papers))
-
-
-st.divider()
-st.subheader("🧪 Multi-Paper Comparison")
-if st.session_state.index_ready:
-    compare_topic = st.text_input("Comparison topic", placeholder="e.g., compare retrieval strategies for hallucination reduction")
-    compare_count = st.slider("Papers to compare", 2, 6, 3)
-    if st.button("Compare Papers"):
-        if not compare_topic:
-            st.warning("Please enter a comparison topic.")
-        else:
-            with st.spinner("Building comparison table..."):
-                comparison = st.session_state.engine.compare_papers(compare_topic, num_papers=compare_count)
-            st.markdown(comparison)
-
-
-st.divider()
-st.subheader("🧾 Claims & Evidence Export")
-if st.session_state.index_ready:
-    claim_topic = st.text_input("Claim extraction topic", placeholder="e.g., key claims on efficient LLM inference")
-    max_claims = st.slider("Max claims", 1, 12, 6)
-    if st.button("Extract Claims"):
-        if not claim_topic:
-            st.warning("Please enter a topic.")
-        else:
-            with st.spinner("Extracting claims with evidence..."):
-                st.session_state.claims_records = st.session_state.engine.extract_claims_with_evidence(
-                    claim_topic, max_claims=max_claims
-                )
+                try:
+                    recommendations = get_paper_recommendations(
+                        st.session_state.engine, 
+                        rec_topic,
+                        num_papers
+                    )
+                    st.markdown(recommendations)
+                except Exception as e:
+                    st.error(f"Failed to get recommendations: {str(e)}")
 
     if st.session_state.claims_records:
         st.dataframe(st.session_state.claims_records, use_container_width=True)
@@ -459,28 +489,20 @@ if st.session_state.index_ready:
 st.divider()
 st.subheader("📝 Citation Generator")
 if st.session_state.paper_metadata:
-    paper_ids = sorted(st.session_state.paper_metadata.keys())
-    selected_id = st.selectbox(
-        "Select paper to cite",
-        options=paper_ids,
-        format_func=lambda pid: f"{st.session_state.paper_metadata[pid].get('title', 'Untitled')} ({pid})",
-    )
-    metadata = st.session_state.paper_metadata[selected_id]
-    apa_citation = generate_apa_citation(metadata)
-    bibtex_citation = generate_bibtex_citation(metadata)
-    st.caption("APA")
-    st.code(apa_citation, language="text")
-    render_copy_button(apa_citation, copy_id=f"copy_apa_{selected_id}", label="Copy APA")
-    st.caption("BibTeX")
-    st.code(bibtex_citation, language="bibtex")
-    render_copy_button(bibtex_citation, copy_id=f"copy_bib_{selected_id}", label="Copy BibTeX")
-
-    bundle_bytes = build_citation_bundle(list(st.session_state.paper_metadata.values()))
-    st.download_button(
-        label="Download Citation Bundle (APA + BibTeX + Metadata)",
-        data=bundle_bytes,
-        file_name="citation_bundle.zip",
-        mime="application/zip",
-    )
+    paper_options = {meta['arxiv_id']: meta['title'] 
+                    for meta in st.session_state.paper_metadata.values()}
+    selected_id = st.selectbox("Select paper to cite", options=list(paper_options.keys()),
+                            format_func=lambda id: f"{paper_options[id]} ({id})")
+    
+    if selected_id:
+        metadata = st.session_state.paper_metadata.get(selected_id, {})
+        citation = generate_apa_citation(metadata)
+        
+        st.code(citation, language="text")
+        
+        if st.button("Copy to Clipboard"):
+            st.session_state.copied = True
+            st.code(citation, language="text")
+            st.success("Citation copied to clipboard!")
 else:
     st.info("Download and process papers to generate citations.")
