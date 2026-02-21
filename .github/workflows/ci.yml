@@ -10,6 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       TOKENIZER_NAME: invalid_tokenizer
+      PYTHONPATH: ${{ github.workspace }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -25,4 +26,4 @@ jobs:
           pip install --prefer-binary -r requirements-dev.txt
 
       - name: Run tests
-        run: pytest -q
+        run: python -m pytest -q
