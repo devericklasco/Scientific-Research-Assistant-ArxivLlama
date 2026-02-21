@@ -1,4 +1,10 @@
+from __future__ import annotations
+
+import hashlib
+import json
 import os
+import stat
+import time
 from pathlib import Path
 from dotenv import load_dotenv
 from llama_index.core import VectorStoreIndex, StorageContext
@@ -7,30 +13,48 @@ from llama_index.embeddings.openai import OpenAIEmbedding
 from llama_index.core.schema import TextNode  # Add this import
 import faiss
 from tqdm import tqdm
-import json
-import hashlib
-import time
-import shutil
 
 # Load environment variables
 load_dotenv()
 
 # Configuration
-CHUNK_PATH = Path(os.getenv("CHUNK_PATH", "./data/chunks"))
-INDEX_PATH = Path(os.getenv("INDEX_PATH", "./data/indices"))
 EMBED_MODEL = "text-embedding-3-small"
 EMBED_DIM = 1536  # Dimension for text-embedding-3-small
 
-def create_vector_index():
-    if not os.getenv("OPENAI_API_KEY"):
+def load_manifest(manifest_path: Path) -> Dict[str, str]:
+    if not manifest_path.exists():
+        return {}
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        if isinstance(raw, dict):
+            return {str(k): str(v) for k, v in raw.items()}
+    except (OSError, json.JSONDecodeError):
+        pass
+    return {}
+
+def save_manifest(manifest_path: Path, manifest: Dict[str, str]) -> None:
+    with open(manifest_path, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2, sort_keys=True)
+
+def _delete_paper_chunks(chroma_collection, arxiv_id: str) -> None:
+    try:
+        chroma_collection.delete(where={"arxiv_id": arxiv_id})
+    except Exception:
+        # Safe no-op when ids do not exist.
+        pass
+
+def create_vector_index(force_rebuild: bool = False) -> Tuple[VectorStoreIndex | None, int]:
+    embedding_backend = get_embedding_backend()
+    if embedding_backend == "openai" and not os.getenv("OPENAI_API_KEY"):
         print("❌ OPENAI_API_KEY not set in environment")
         return None, 0
 
     print("🚀 Starting index creation...")
     start_time = time.time()
     
-    # Create storage directory
-    INDEX_PATH.mkdir(parents=True, exist_ok=True)
+    # Determine storage location
+    persist_dir = "/tmp/chroma_db" if "STREAMLIT_SERVER" in os.environ else os.getenv("INDEX_PATH", "./data/indices/chroma_db")
     
     # Initialize FAISS index
     faiss_index = faiss.IndexFlatIP(EMBED_DIM)  # Inner product for cosine similarity
@@ -40,11 +64,12 @@ def create_vector_index():
     # Also save the vector store configuration
     vector_store.persist(persist_path=str(INDEX_PATH / "faiss_vector_store"))
     
-    # Load and process chunk files
-    chunk_files = list(CHUNK_PATH.glob("*.json"))
+    # Get chunk path
+    chunk_path = Path(os.getenv("CHUNK_PATH", "./data/chunks"))
+    chunk_files = list(chunk_path.glob("*.json"))
     
     if not chunk_files:
-        print(f"❌ No JSON files found in {CHUNK_PATH}. Run PDF processor first.")
+        print(f"❌ No JSON files found in {chunk_path}")
         return None, 0
     
     # Prepare nodes for insertion
@@ -56,10 +81,9 @@ def create_vector_index():
             try:
                 paper_data = json.load(f)
             except json.JSONDecodeError:
-                print(f"⚠️ Skipping invalid JSON file: {chunk_file}")
+                print(f"⚠️ Skipping invalid JSON: {chunk_file}")
                 continue
-                
-        # Safely get arxiv_id with fallback
+
         arxiv_id = paper_data.get("arxiv_id", chunk_file.stem)
         
         # Create nodes for each chunk
@@ -114,11 +138,8 @@ def create_vector_index():
     
     elapsed = time.time() - start_time
     
-    print(f"\n✅ Index creation complete!")
-    print(f"   Total vectors: {vector_count}")
-    print(f"   Time taken: {elapsed:.1f} seconds")
-    print(f"   Estimated tokens processed: {total_tokens}")
-    print(f"   Estimated embedding cost: ${embedding_cost:.6f}")
+    print(f"\n✅ Index created successfully!")
+    print(f"   Vectors: {vector_count} | Time: {elapsed:.1f}s")
     
     return index, vector_count
 
@@ -130,9 +151,8 @@ if __name__ == "__main__":
         shutil.rmtree(faiss_index_path)
     
     index, vector_count = create_vector_index()
-    
     if index and vector_count > 0:
-        print("\n🔍 Testing query functionality...")
+        print("\n🔍 Testing query...")
         query_engine = index.as_query_engine(similarity_top_k=1)
         test_response = query_engine.query("What is the main topic?")
         print(f"   Test response: {test_response.response[:150]}...")

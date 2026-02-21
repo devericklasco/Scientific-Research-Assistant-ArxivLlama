@@ -17,20 +17,34 @@
 - 🔍 Search and download papers from ArXiv by topic  
 - 📥 Automatically extract metadata (title, authors, abstract)  
 - ⚡ Supports batch downloads (up to 50 papers at a time)  
+- 🕒 Recency-aware search filters to prioritize newer papers  
+- 🔁 Deduplication and retry-safe downloads  
 
 ### 🧠 Intelligent Analysis
 - 🦙 RAG-powered semantic understanding using **LlamaIndex**  
 - 💬 Query paper content in natural language  
 - 📊 Retrieve responses with relevance-based citations  
 - 📖 Get contextual excerpts from the source documents  
+- 🧬 Hybrid reranking (semantic + lexical + recency score)  
+- ✅ "Insufficient evidence" fallback for low-confidence retrieval  
 
 ![Question Interface](images/Image2.png)
 
 ### 🛠️ Research Tools
 - 📑 APA-style citation generator  
+- 📚 BibTeX citation generator + citation bundle export (ZIP)  
 - 📚 AI-driven paper recommendations  
+- 🧪 Multi-paper comparison table  
+- 🧾 Claim/evidence extraction with CSV/JSON export  
 - 💰 Cost tracking for OpenAI API calls  
 - 🗂️ Persistent vector storage via **ChromaDB**  
+- ♻️ Incremental indexing to skip unchanged papers  
+- 🧹 Auto cleanup of inactive workspaces (default: 2 hours)  
+
+### Storage & Cleanup
+- Each user/session writes to an isolated workspace under `data/sessions/`.
+- Workspaces are automatically deleted after inactivity (default `2 hours`).
+- You can override cleanup TTL with `WORKSPACE_TTL_SECONDS` environment variable.
 
 ## Installation & Setup
 ### Clone the repository
@@ -56,6 +70,8 @@ streamlit run app.py
 Input your research topic (e.g., "reinforcement learning in robotics")
 
 Choose the number of papers to download (1–50)
+
+Set a recency window (e.g., last 3 years) to reduce stale papers
 
 Downloads saved to: data/papers/
 ![Download Interface](images/download.png)
@@ -96,6 +112,14 @@ Helps discover relevant papers within your indexed library
 Built with ❤️ by [Erick Busuulwa](https://github.com/devericklasco)  
 Follow me on [Twitter](https://x.com/ericklasco)  
 
+## Testing
+Run automated tests:
+
+```bash
+pip install -r requirements-dev.txt
+pytest -q
+```
+
 
 ---
 
@@ -110,4 +134,3 @@ D --> E[Vector DB: ChromaDB]
 E --> F[Query Engine: LlamaIndex]
 F --> G[LLM Interface: OpenAI]
 G --> H[Streamlit UI]
-

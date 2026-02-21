@@ -1,16 +1,21 @@
 import warnings
-warnings.filterwarnings("ignore", category=UserWarning)
+from pathlib import Path
+from uuid import uuid4
+
 import streamlit as st
-from src.query_engine import initialize_engine, get_paper_recommendations
+import streamlit.components.v1 as components
+
+from src.arxiv_downloader import search_and_download_papers
+from src.citation_generator import (
+    build_citation_bundle,
+    generate_apa_citation,
+    generate_bibtex_citation,
+)
 from src.create_index import create_vector_index
 from src.pdf_processor import process_papers
-from src.arxiv_downloader import search_and_download_papers
-from src.citation_generator import generate_apa_citation
-from pathlib import Path
-import os
-import time
-import json
-import shutil
+from src.query_engine import create_query_engine_from_index, get_paper_recommendations
+
+warnings.filterwarnings("ignore", category=UserWarning)
 
 # Configuration
 INDEX_PATH = Path(os.getenv("INDEX_PATH", "./data/indices"))
@@ -44,7 +49,226 @@ def cleanup_faiss_index():
 if "engine" not in st.session_state:
     st.session_state.engine = None
     st.session_state.index_ready = False
+if "paper_metadata" not in st.session_state:
     st.session_state.paper_metadata = {}
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+if "claims_records" not in st.session_state:
+    st.session_state.claims_records = []
+if "session_id" not in st.session_state:
+    st.session_state.session_id = uuid4().hex[:12]
+if "workspace_id" not in st.session_state:
+    st.session_state.workspace_id = f"ws_boot_{uuid4().hex[:8]}"
+if "embedding_backend" not in st.session_state:
+    st.session_state.embedding_backend = "openai"
+if "last_cleanup_check_ts" not in st.session_state:
+    st.session_state.last_cleanup_check_ts = 0.0
+
+
+def _safe_chmod(path: Path) -> None:
+    try:
+        os.chmod(path, stat.S_IRWXU | stat.S_IRWXG | stat.S_IRWXO)
+    except OSError:
+        pass
+
+
+def _sessions_base() -> Path:
+    base = Path("/tmp/arxivllama_sessions") if "STREAMLIT_SERVER" in os.environ else Path("./data/sessions")
+    base.mkdir(parents=True, exist_ok=True)
+    _safe_chmod(base)
+    return base
+
+
+def _session_root() -> Path:
+    base = _sessions_base()
+    root = base / st.session_state.session_id
+    root.mkdir(parents=True, exist_ok=True)
+    _safe_chmod(root)
+    return root
+
+
+def _workspace_root(workspace_id: str) -> Path:
+    return _session_root() / "workspaces" / workspace_id
+
+
+def _workspace_state_path(workspace_root: Path) -> Path:
+    return workspace_root / WORKSPACE_STATE_FILENAME
+
+
+def _touch_workspace_activity(workspace_root: Path, backend: str) -> None:
+    workspace_root.mkdir(parents=True, exist_ok=True)
+    now = time.time()
+    state = {
+        "last_active_epoch": now,
+        "last_active_utc": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(now)),
+        "backend": backend,
+    }
+    try:
+        with open(_workspace_state_path(workspace_root), "w", encoding="utf-8") as f:
+            json.dump(state, f, indent=2)
+    except OSError:
+        pass
+
+
+def _read_workspace_last_active(workspace_root: Path) -> float:
+    state_path = _workspace_state_path(workspace_root)
+    if state_path.exists():
+        try:
+            with open(state_path, "r", encoding="utf-8") as f:
+                state = json.load(f)
+            ts = float(state.get("last_active_epoch", 0))
+            if ts > 0:
+                return ts
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            pass
+    try:
+        return workspace_root.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def cleanup_stale_workspaces(active_workspace: Path | None = None) -> int:
+    now = time.time()
+    base = _sessions_base()
+    removed = 0
+    active_workspace_str = str(active_workspace.resolve()) if active_workspace is not None else ""
+    for workspaces_dir in base.glob("*/workspaces"):
+        if not workspaces_dir.is_dir():
+            continue
+        for workspace_root in workspaces_dir.iterdir():
+            if not workspace_root.is_dir():
+                continue
+            if active_workspace_str and str(workspace_root.resolve()) == active_workspace_str:
+                continue
+            last_active = _read_workspace_last_active(workspace_root)
+            if last_active <= 0:
+                continue
+            if (now - last_active) > WORKSPACE_TTL_SECONDS:
+                shutil.rmtree(workspace_root, ignore_errors=True)
+                removed += 1
+        # remove empty workspaces dir
+        try:
+            if workspaces_dir.exists() and not any(workspaces_dir.iterdir()):
+                workspaces_dir.rmdir()
+        except OSError:
+            pass
+        # remove empty session dir
+        session_root = workspaces_dir.parent
+        try:
+            if session_root.exists() and not any(session_root.iterdir()):
+                session_root.rmdir()
+        except OSError:
+            pass
+    return removed
+
+
+def activate_workspace(workspace_id: str, embedding_backend: str | None = None, reset_state: bool = False):
+    backend = (embedding_backend or st.session_state.embedding_backend or "openai").strip().lower()
+    if backend not in {"openai", "local"}:
+        backend = "openai"
+
+    workspace_root = _workspace_root(workspace_id)
+    papers_path = workspace_root / "papers"
+    chunks_path = workspace_root / "chunks"
+    chroma_path = workspace_root / "indices" / "chroma_db"
+
+    for path in [papers_path, chunks_path, chroma_path]:
+        path.mkdir(parents=True, exist_ok=True)
+        _safe_chmod(path)
+
+    collection_name = f"arxiv_papers_{st.session_state.session_id}_{workspace_id}".replace("-", "_")
+    os.environ["DATA_PATH"] = str(papers_path)
+    os.environ["CHUNK_PATH"] = str(chunks_path)
+    os.environ["INDEX_PATH"] = str(chroma_path)
+    os.environ["CHROMA_COLLECTION_NAME"] = collection_name
+    os.environ["EMBEDDING_BACKEND"] = backend
+
+    st.session_state.workspace_id = workspace_id
+    st.session_state.workspace_root = str(workspace_root)
+    st.session_state.embedding_backend = backend
+    _touch_workspace_activity(workspace_root, backend)
+
+    if reset_state:
+        st.session_state.paper_metadata = {}
+        st.session_state.index_ready = False
+        st.session_state.engine = None
+        st.session_state.messages = []
+        st.session_state.claims_records = []
+
+    return papers_path, chunks_path, chroma_path
+
+
+def start_new_workspace(embedding_backend: str | None = None):
+    workspace_id = f"ws_{int(time.time())}_{uuid4().hex[:6]}"
+    return activate_workspace(
+        workspace_id=workspace_id,
+        embedding_backend=embedding_backend,
+        reset_state=True,
+    )
+
+
+def render_copy_button(text: str, copy_id: str, label: str = "Copy") -> None:
+    element_id = re.sub(r"[^a-zA-Z0-9_-]", "_", copy_id)
+    label_safe = html.escape(label)
+    text_json = json.dumps(text)
+    component_html = f"""
+    <div style="margin: 0.1rem 0 0.5rem 0;">
+      <button id="{element_id}" style="border: 1px solid #ccc; border-radius: 8px; padding: 0.35rem 0.7rem; background: white; cursor: pointer;">
+        {label_safe}
+      </button>
+    </div>
+    <script>
+      const button = document.getElementById("{element_id}");
+      const textToCopy = {text_json};
+      async function copyText() {{
+        try {{
+          if (navigator.clipboard && window.isSecureContext) {{
+            await navigator.clipboard.writeText(textToCopy);
+          }} else {{
+            const textarea = document.createElement("textarea");
+            textarea.value = textToCopy;
+            textarea.style.position = "fixed";
+            textarea.style.left = "-9999px";
+            document.body.appendChild(textarea);
+            textarea.focus();
+            textarea.select();
+            document.execCommand("copy");
+            document.body.removeChild(textarea);
+          }}
+          button.textContent = "Copied";
+        }} catch (err) {{
+          button.textContent = "Copy failed";
+        }}
+      }}
+      button.addEventListener("click", copyText);
+    </script>
+    """
+    components.html(component_html, height=45)
+
+
+def load_metadata_from_disk(reset: bool = True) -> None:
+    if reset:
+        st.session_state.paper_metadata = {}
+    papers_path = Path(os.getenv("DATA_PATH", "./data/papers"))
+    for json_file in papers_path.glob("*.json"):
+        try:
+            with open(json_file, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+            st.session_state.paper_metadata[meta["arxiv_id"]] = meta
+        except (OSError, json.JSONDecodeError, KeyError):
+            continue
+
+
+activate_workspace(
+    st.session_state.workspace_id,
+    embedding_backend=st.session_state.embedding_backend,
+    reset_state=False,
+)
+
+if (time.time() - st.session_state.last_cleanup_check_ts) >= WORKSPACE_CLEANUP_COOLDOWN_SECONDS:
+    cleanup_stale_workspaces(active_workspace=Path(st.session_state.workspace_root))
+    st.session_state.last_cleanup_check_ts = time.time()
+
 
 def load_paper_metadata():
     """Load paper metadata from chunk files"""
@@ -61,17 +285,31 @@ def load_paper_metadata():
 # Sidebar for setup
 with st.sidebar:
     st.header("⚙️ Configuration")
-    api_key = st.text_input("OpenAI API Key", type="password", value=os.getenv("OPENAI_API_KEY", ""))
-    os.environ["OPENAI_API_KEY"] = api_key
-    
+    embedding_backend = st.radio(
+        "Embedding Backend",
+        options=["openai", "local"],
+        index=0 if st.session_state.embedding_backend == "openai" else 1,
+        help="Use OpenAI for production-quality retrieval, or local ONNX embeddings for local/dev usage.",
+    )
+    if embedding_backend != st.session_state.embedding_backend:
+        st.session_state.embedding_backend = embedding_backend
+        os.environ["EMBEDDING_BACKEND"] = embedding_backend
+        st.info("Embedding backend changed. Start a new workspace and re-index to avoid dimension mismatch.")
+
+    api_key = st.text_input("OpenAI API Key", type="password", value="", help="Enter your OpenAI API key")
+    if api_key:
+        os.environ["OPENAI_API_KEY"] = api_key
+    elif "OPENAI_API_KEY" in os.environ:
+        del os.environ["OPENAI_API_KEY"]
+
     st.divider()
     st.header("📥 Paper Management")
-    
-    # Paper download section
-    with st.expander("Download Papers from ArXiv"):
+    with st.expander("Download Papers from ArXiv", expanded=True):
         topic = st.text_input("Research Topic", placeholder="e.g., large language models")
-        max_results = st.slider("Max Papers", 1, 50, 10)
-        
+        max_results = st.slider("Max Papers", 1, 50, 12)
+        max_age_years = st.slider("Only include papers from last N years", 1, 15, 3)
+        sort_by_recent = st.checkbox("Prioritize newest papers", value=True)
+
         if st.button("Download Papers", key="download_btn"):
             if not topic:
                 st.warning("Please enter a research topic")
@@ -132,21 +370,14 @@ with st.sidebar:
 # Main chat interface
 if st.session_state.index_ready:
     st.subheader("💬 Research Assistant")
-    st.caption("Ask questions about your research papers")
-    
-    # Initialize chat history
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
-    
-    # Display chat messages
+    st.caption("Answers are grounded with source metadata and page-level evidence when available.")
+
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
-            
-            # Show sources if available
-            if message["role"] == "assistant" and "sources" in message:
+            if message["role"] == "assistant" and message.get("sources"):
                 with st.expander("View Sources & Citations"):
-                    for i, source in enumerate(message["sources"], 1):
+                    for i, source in enumerate(message["sources"], start=1):
                         metadata = source["metadata"]
                         st.markdown(f"**Source {i}:**")
                         st.caption(f"**Title:** {metadata.get('title', 'Untitled')}")
@@ -210,12 +441,11 @@ if st.session_state.index_ready:
                 except Exception as e:
                     st.error(f"Error processing query: {str(e)}")
 else:
-    st.info("Please configure and create an index using the sidebar controls")
+    st.info("Please configure and create an index using the sidebar controls.")
 
-# Paper recommendation section
+
 st.divider()
 st.subheader("📚 Paper Recommendations")
-
 if st.session_state.index_ready:
     rec_topic = st.text_input("Enter research topic for recommendations", 
                             placeholder="e.g., transformer architectures")
@@ -236,10 +466,28 @@ if st.session_state.index_ready:
                 except Exception as e:
                     st.error(f"Failed to get recommendations: {str(e)}")
 
-# Citation generator section
+    if st.session_state.claims_records:
+        st.dataframe(st.session_state.claims_records, use_container_width=True)
+        csv_buffer = io.StringIO()
+        writer = csv.DictWriter(csv_buffer, fieldnames=list(st.session_state.claims_records[0].keys()))
+        writer.writeheader()
+        writer.writerows(st.session_state.claims_records)
+        st.download_button(
+            label="Download Evidence Table (CSV)",
+            data=csv_buffer.getvalue().encode("utf-8"),
+            file_name="claims_evidence_table.csv",
+            mime="text/csv",
+        )
+        st.download_button(
+            label="Download Evidence Table (JSON)",
+            data=json.dumps(st.session_state.claims_records, indent=2).encode("utf-8"),
+            file_name="claims_evidence_table.json",
+            mime="application/json",
+        )
+
+
 st.divider()
 st.subheader("📝 Citation Generator")
-
 if st.session_state.paper_metadata:
     paper_options = {meta['arxiv_id']: meta['title'] 
                     for meta in st.session_state.paper_metadata.values()}
@@ -257,4 +505,4 @@ if st.session_state.paper_metadata:
             st.code(citation, language="text")
             st.success("Citation copied to clipboard!")
 else:
-    st.info("Download and process papers to generate citations")
+    st.info("Download and process papers to generate citations.")

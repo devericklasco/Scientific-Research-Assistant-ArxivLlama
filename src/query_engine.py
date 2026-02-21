@@ -1,4 +1,10 @@
+from __future__ import annotations
+
+import os
+import re
 import sys
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 project_root = Path(__file__).parent.parent
 sys.path.append(str(project_root))
@@ -15,7 +21,6 @@ from src.citation_generator import generate_apa_citation
 import os
 from dotenv import load_dotenv
 
-# Load environment variables
 load_dotenv()
 
 # Configuration
@@ -44,8 +49,9 @@ def initialize_engine():
     
     # Create index
     index = VectorStoreIndex.from_vector_store(
-        vector_store, 
-        storage_context=storage_context
+        vector_store,
+        storage_context=storage_context,
+        embed_model=embed_model,
     )
     
     # Create query engine with GPT-4o
@@ -68,7 +74,8 @@ def get_paper_recommendations(query_engine, topic: str, num_papers: int = 3) -> 
         "Format as markdown bullet points."
     )
     response = query_engine.query(prompt)
-    return response.response
+    return response.response if hasattr(response, "response") else str(response)
+
 
 def load_paper_metadata():
     """Load paper metadata from chunk files"""
@@ -88,6 +95,7 @@ def load_paper_metadata():
 # FAISS doesn't support direct metadata retrieval by ID like Chroma did
 # Metadata is now managed through load_paper_metadata() and session state in app.py
 
+
 if __name__ == "__main__":
     print("Initializing research assistant...")
     engine = initialize_engine()
@@ -98,15 +106,12 @@ if __name__ == "__main__":
     total_cost = 0.0
     
     while True:
-        query = input("\n📝 Your research question: ")
-        if query.lower() in ['exit', 'quit']:
+        query = input("\n📝 Your research question: ").strip()
+        if query.lower() in {"exit", "quit"}:
             break
-            
         if query.startswith("!recommend"):
             topic = query.replace("!recommend", "").strip() or "machine learning"
-            print(f"\n🔍 Getting recommendations for: {topic}")
-            recommendations = get_paper_recommendations(engine, topic)
-            print(f"\n📚 Recommended Papers:\n{recommendations}")
+            print(engine.recommend_papers(topic))
             continue
      
         # Track query cost
