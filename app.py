@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import sys
 
 # Prefer pysqlite3 when available (helps older environments), but fall back to
